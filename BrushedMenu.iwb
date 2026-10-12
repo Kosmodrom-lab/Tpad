@@ -1,0 +1,129 @@
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': BrushedMenu.iwb - Brushed Metal Background Skinning Engine
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+$INCLUDE "windowssdk.inc"
+$INCLUDE "BrushedMenu.inc"
+
+AutoDefine "Off"
+
+SUB CBrushedMenuBase::CBrushedMenuBase()
+    m_bmp = NULL
+    m_hbrBrushed = NULL
+    BitmapTransparentColor = RGB(255, 0, 255)
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::_CBrushedMenuBase()
+    IF m_bmp <> NULL THEN DeleteObject(m_bmp)
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SetImages(HBITMAP bmp, COLORREF clrTransparent), HBITMAP
+    BitmapTransparentColor = clrTransparent
+    HBITMAP old = m_bmp
+    m_bmp = bmp
+    RETURN old
+ENDSUB
+
+SUB CBrushedMenuBase::SetTextureBrush(HBRUSH hBrush)
+    m_hbrBrushed = hBrush
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SetMenuFont(HFONT hFont)
+    m_hFont = hFont
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::AttachMenu(HWND hwnd, HMENU menu)
+    IF menu = 0 THEN RETURN
+
+    m_hwnd = hwnd
+    m_menu = menu
+
+    ' 1. Apply brushed background pattern to top menu bar
+    MENUINFO mi
+    RtlZeroMemory(&mi, LEN(mi))
+    mi.cbSize  = LEN(mi)
+    mi.fMask   = 0x00000002 ' MIM_BACKGROUND
+    mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
+    SetMenuInfo(menu, &mi)
+
+    ' 2. Recursively apply brushed background pattern to all child popups
+    SkinSubmenus(menu)
+
+    DrawMenuBar(hwnd)
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SkinSubmenus(HMENU menu)
+    IF menu = 0 THEN RETURN
+
+    ' 1. Apply pattern brush directly to the root menu handle passed in
+    MENUINFO mi
+    RtlZeroMemory(&mi, LEN(mi))
+    mi.cbSize  = LEN(mi)
+    mi.fMask   = 0x80000002 ' MIM_BACKGROUND | MIM_APPLYTOSUBMENUS
+    mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
+    SetMenuInfo(menu, &mi)
+
+    ' 2. Recurse into child submenus if any exist
+    MENUITEMINFO mii
+    INT a = 0
+    INT count = GetMenuItemCount(menu)
+    If count <= 0 THEN RETURN
+
+    For a = 0 TO count - 1
+        RtlZeroMemory(&mii, LEN(mii))
+        mii.cbSize = LEN(mii)
+        mii.fMask  = 0x00000004 ' MIIM_SUBMENU
+
+        If GetMenuItemInfoA(menu, a, TRUE, &mii) <> 0 Then
+            If mii.hSubMenu <> 0 AND mii.hSubMenu <> menu Then
+                SkinSubmenus(mii.hSubMenu)
+            EndIf
+        EndIf
+    Next a
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::AssignBitmapIndex(WORD wID, INT index)
+    MENUITEMINFO mii
+    BITMAP bm
+    RtlZeroMemory(&mii, LEN(mii))
+
+    IF m_bmp <> NULL AND GetObjectA(m_bmp, LEN(bm), &bm) <> 0 THEN
+        mii.cbSize = LEN(mii)
+        mii.fMask  = 0x00000020 ' MIIM_CHECKMARKS
+
+        HDC hdc      = GetDCA(m_hwnd)
+        HDC hdc_from = CreateCompatibleDC(hdc)
+        HDC hdc_to   = CreateCompatibleDC(hdc)
+
+        INT x = index * bm.bmHeight
+
+        mii.hbmpChecked   = CreateCompatibleBitmap(hdc, bm.bmHeight, bm.bmHeight)
+        mii.hbmpUnchecked = CreateCompatibleBitmap(hdc, bm.bmHeight, bm.bmHeight)
+
+        INT bmp_from = SelectObject(hdc_from, m_bmp)
+        INT bmp_to
+
+        bmp_to = SelectObject(hdc_to, mii.hbmpChecked)
+        BitBlt(hdc_to, 0, 0, bm.bmHeight, bm.bmHeight, hdc_from, x, 0, SRCCOPY)
+        SelectObject(hdc_to, bmp_to)
+
+        bmp_to = SelectObject(hdc_to, mii.hbmpUnchecked)
+        BitBlt(hdc_to, 0, 0, bm.bmHeight, bm.bmHeight, hdc_from, x, 0, SRCCOPY)
+        SelectObject(hdc_to, bmp_to)
+
+        SelectObject(hdc_from, bmp_from)
+
+        ReleaseDC(m_hwnd, hdc)
+        DeleteDC(hdc_from)
+        DeleteDC(hdc_to)
+
+        SetMenuItemInfoA(m_menu, wID, FALSE, &mii)
+    ENDIF
+    RETURN
+ENDSUB

@@ -1,0 +1,61 @@
+strip BITMAP "D:\\AI\\TXT_Edit\\res\\strip.bmp"
+brushed BITMAP "D:\\AI\\TXT_Edit\\RES\\brushed.bmp"
+brgn_small BITMAP "D:\\AI\\TXT_Edit\\RES\\brgn_small.bmp"
+brushed_btn BITMAP "D:\\AI\\TXT_Edit\\RES\\brushed_btn.bmp"
+brushed_btn_lg BITMAP "D:\\AI\\TXT_Edit\\RES\\brushed_btn_lg.bmp"
+brgn_large BITMAP "D:\\AI\\TXT_Edit\\RES\\brgn_large.bmp"
+brgn_XL BITMAP "D:\\AI\\TXT_Edit\\RES\\brgn_XL.bmp"
+brushed_btn_XL BITMAP "D:\\AI\\TXT_Edit\\RES\\brushed_btn_XL.bmp"
+
+1000 MENU
+BEGIN
+    POPUP "&File"
+    BEGIN
+        MENUITEM "&New\tCtrl+N", 1
+        MENUITEM "&Open...\tCtrl+O", 2
+        MENUITEM "&Save As...\tCtrl+S", 3
+        MENUITEM SEPARATOR
+        MENUITEM "&Print...\tCtrl+P", 4
+        MENUITEM "E&xit\tAlt+F4", 5
+    END
+    POPUP "&Edit"
+    BEGIN
+        MENUITEM "&Undo\tCtrl+Z", 10
+        MENUITEM "&Redo\tCtrl+Y", 19
+        MENUITEM SEPARATOR
+        MENUITEM "Cu&t\tCtrl+X", 11
+        MENUITEM "&Copy\tCtrl+C", 12
+        MENUITEM "&Paste\tCtrl+V", 13
+        MENUITEM SEPARATOR
+        MENUITEM "Select &All\tCtrl+A", 14
+        MENUITEM SEPARATOR
+        MENUITEM "&Find...\tCtrl+F", 15
+        MENUITEM "&Replace...\tCtrl+H", 16
+    END
+    POPUP "&View"
+    BEGIN
+        MENUITEM "&Wrap\tCtrl+W", 17
+        MENUITEM "&Font...", 18
+        POPUP "Theme"
+        BEGIN
+            MENUITEM "Classic Light", 30, CHECKED
+            MENUITEM "Dark Modern", 31
+        END
+        POPUP "Syntax"
+        BEGIN
+            MENUITEM "Default", 32, CHECKED
+            MENUITEM "Assembler", 33
+            MENUITEM "Basic", 34
+            MENUITEM "C C++", 35
+            MENUITEM "Python", 36
+        END
+        MENUITEM SEPARATOR
+        MENUITEM "On &Top\tCtrl+T", 20
+        MENUITEM SEPARATOR
+        MENUITEM "&About Tpad...\tF1", 21
+    END
+END
+1a ICON "D:\\AI\\TXT_Edit\\res\\tpad.ico"
+2big ICON "D:\\AI\\TXT_Edit\\RES\\big.ico"
+3small ICON "D:\\AI\\TXT_Edit\\RES\\small.ico"
+4bin ICON "D:\\AI\\TXT_Edit\\RES\\Bin.ico"

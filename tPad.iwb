@@ -1,0 +1,4578 @@
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Tpad - Text Editor for IWBasic 2.5
+': Memory-Mapped File Loader, UTF-8 Engine, and Brushed Metal Skinning
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+$USE "SciLexer.lib"
+
+$INCLUDE "windowssdk.inc"
+$INCLUDE "commctrl.inc"
+$INCLUDE "fletchie_ctl.inc"
+$INCLUDE "BrushedMenu.inc"
+$INCLUDE "SciLexer.inc"
+$INCLUDE "Scintilla.inc"
+
+AutoDefine "Off"
+
+$MAIN
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Tooltip Balloon Types & Globals
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+TYPE TOOLINFO_BALLOON
+    INT cbSize
+    INT uFlags
+    HWND hwnd
+    UINT uId
+    WINRECT rc
+    HINSTANCE hinst
+    POINTER lpszText
+    LPARAM lParam
+ENDTYPE
+
+GLOBAL HWND g_hwndToolTip = 0
+
+CONST BALLOON_DISMISS_TIMER_ID = 9005
+CONST TTF_TRACK     = 0x0020
+CONST TTF_ABSOLUTE  = 0x0080
+CONST TTM_ADDTOOLA  = 1028
+CONST TTM_DELTOOLA  = 1029
+CONST TTM_TRACKACTIVATE = 1041
+CONST TTM_TRACKPOSITION = 1042
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Application State Structure & Custom Types
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+TYPE APP_STATE
+    ' Window Position & State
+    INT left
+    INT top
+    INT width
+    INT height
+    INT onTop
+    INT wordWrap
+    INT showHScroll
+    
+    ' Font Configuration
+    STRING fontName
+    INT fontSize
+    INT fontWeight
+    INT fontFlags
+    
+    ' Editor Runtime State
+    INT isOverwrite
+    INT isANSI
+    INT themeID
+    
+    ' MRU File Tracking
+    STRING mru[5]
+    INT mruFlags[5]
+
+    STRING eolMode
+    STRING filepath
+ENDTYPE
+
+GLOBAL APP_STATE g_App
+
+GLOBAL CBrushedMenuBase g_WndMenu
+GLOBAL INT g_InUpdateUI = FALSE
+GLOBAL INT g_IsReplaceDialog
+GLOBAL INT g_startAtTop = FALSE
+GLOBAL INT g_IsLoading = TRUE
+GLOBAL INT g_IsResizing = FALSE
+GLOBAL INT g_activeLexer = 0
+GLOBAL STRING g_CRLF = CHR$(13) + CHR$(10)
+CONST About_Close  = 2
+GLOBAL UINT g_hAboutBannerBmp = 0
+GLOBAL UINT g_hAboutFooterBmp = 0
+
+CONST About_Banner = 2
+CONST About_Footer = 12
+
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Persistent Ruler GDI Object Caching
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GLOBAL HFONT   g_hRulerFont        = 0
+GLOBAL HPEN    g_hRulerSepPen      = 0
+GLOBAL HPEN    g_hRulerPolePen     = 0
+GLOBAL HPEN    g_hRulerFlagPen     = 0
+GLOBAL HBRUSH  g_hRulerFlagBrush   = 0
+GLOBAL HPEN    g_hRulerArrowPen    = 0
+GLOBAL HPEN    g_hRulerEraserPen   = 0
+GLOBAL HBRUSH  g_hRulerEraserBrush = 0
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Scintilla Control Globals & Constants
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GLOBAL HANDLE g_hSciLib = 0
+GLOBAL UINT g_hSciCtrl = 0
+
+CONST IDC_SCI = 100
+CONST IDC_SCI_CREATE = 2024 + IDC_SCI
+
+CONST SCE_C_KEYWORD = 5 
+CONST SCE_C_STRING = 6
+CONST SCE_C_COMMENT = 1 
+CONST SCE_C_COMMENTLINE = 2 
+
+CONST SCI_SETWHITESPACESIZE = 2086
+CONST SC_EDGE_LINE = 1
+CONST SC_EDGE_BACKGROUND = 2
+CONST SCWS_VISIBLEALWAYS = 1
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Enumerated Constants (Synchronized to Resource Script IDs)
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ENUM tpad_commands
+    CMD_NEW = 1
+    CMD_OPEN = 2
+    CMD_SAVEAS = 3
+    CMD_PRINT = 4
+    CMD_EXIT = 5
+
+    CMD_UNDO = 10
+    CMD_CUT = 11
+    CMD_COPY = 12
+    CMD_PASTE = 13
+    CMD_SELECTALL = 14
+    CMD_FIND = 15
+    CMD_REPLACE = 16
+    CMD_WORDWRAP = 17
+
+    CMD_FONT = 18
+    CMD_REDO = 19
+    CMD_ONTOP = 20
+    CMD_ABOUT = 21
+    CMD_HSCROLL = 22
+    CMD_PROPERTIES = 23
+
+    CMD_CLEAR_MRU = 5010
+ENDENUM
+
+ENUM control_ids
+    EDIT_1 = 111
+    STATUS_1 = 222
+ENDENUM
+
+ENUM dialog_controls
+    lblSearch = 600
+    lblReplace
+    ctlSearchtext
+    ctlReplacetext
+    ctlMatchCase
+    ctlMatchWholeWord
+    ctlFind
+    ctlReplaceBtn = 608
+    ctlReplaceAll
+    ctlClose = 2
+ENDENUM
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Local Declares
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+DECLARE GutterWndProc(), INT
+DECLARE RulerWndProc(), INT
+DECLARE Show_Find(WINDOW win, INT ctrlID, INT findreplace)
+DECLARE Load_FindReplace()
+DECLARE routineFindReplace(), INT
+DECLARE doFind(WINDOW w, INT ctrlID, STRING textToFind, INT ignoreCase)
+DECLARE doReplace(WINDOW w, INT ctrlID, STRING textToFind, STRING textToRep, INT ignoreCase)
+DECLARE doReplaceAll(WINDOW w, INT ctrlID, STRING textToFind, STRING textToRep, INT ignoreCase)
+DECLARE setfirststart(WINDOW w, INT ctrlID)
+DECLARE GetUTF8ByteLength(STRING textVal$), INT
+DECLARE TpadHandler(), INT
+DECLARE Abouthandler(), INT
+DECLARE ColorSubClass(INT hwnd, INT uMsg, INT wParam, POINTER lParam), INT
+DECLARE ColorFindSubClass(hwnd : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+DECLARE subclassProc(hWnd : INT, uMsg : INT, wParam : INT, lParam : INT, uIdSubclass : UINT_PTR, dwRefData : DWORD_PTR), INT
+DECLARE EDIT(HWND : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+DECLARE LoadMemoryMappedFile(STRING filePath$), INT
+DECLARE DoOpen()
+DECLARE DoSave()
+DECLARE DoPrint()
+DECLARE DoResize()
+DECLARE FileNew()
+DECLARE IsFileChanged()
+DECLARE ToggleOnTop()
+DECLARE ToggleWordWrap()
+DECLARE OpenFontDialog()
+DECLARE INIRead()
+DECLARE INIWrite()
+DECLARE FlushINI()
+DECLARE mruArray()
+DECLARE InitAbout()
+DECLARE InitGutter()
+DECLARE InitRuler()
+DECLARE UpdateGutter()
+DECLARE DrawRuler()
+DECLARE UpdateStatusBar()
+DECLARE UpdateTitleBar()
+DECLARE Edit_Scroll_2bottom()
+DECLARE Edit_Scroll_2Top()
+DECLARE Edit_Scroll_2Line()
+DECLARE DoEndProgram()
+DECLARE RemoveQuotes(), STRING
+DECLARE GetRect(WINDOW Wnd, INT cID), POINTER
+DECLARE DoUndo(WINDOW w, INT ctrlID)
+DECLARE DoRedo(WINDOW w, INT ctrlID)
+DECLARE AttachCustomMenuBitmaps()
+DECLARE Trace(STRING msg$)
+DECLARE BGRA_FillVerticalGradient(POINTER pBits, INT width, INT height, INT stride, DWORD colTop, DWORD colBottom)
+DECLARE SSE2_BlendHighlightRow(POINTER pBits, INT width, DWORD highlightColor)
+DECLARE StartFileMonitoring()
+DECLARE GetFileWriteTime(POINTER pFilePath, POINTER pFileTime), INT
+DECLARE CheckFileStatus()
+DECLARE ToggleBookmark(INT lineIdx)
+DECLARE IsLineBookmarked(INT lineIdx), INT
+DECLARE ClearAllBookmarks()
+DECLARE GotoNextBookmark(INT currentLine, INT totalLines)
+DECLARE GotoPrevBookmark(INT currentLine, INT totalLines)
+DECLARE SafeAllocHeap(DWORD sizeInBytes), POINTER
+DECLARE SafeFreeHeap(POINTER pMem)
+DECLARE ConfigureScintillaDefaults()
+DECLARE DeferredFileOpen(), INT
+DECLARE RotateBitmap90(INT hBmpSrc), INT
+DECLARE RemoveMRUItem(INT index)
+DECLARE CleanupAppResources(POINTER pData), INT
+DECLARE GetReadableFileSize(DWORD fileSize, POINTER pOutBuf)
+DECLARE SaveBufferToFile(STRING filePath$), INT
+DECLARE SetLexerByExtension(STRING filePath$)
+DECLARE ApplyThemeStyles(INT lexerID)
+DECLARE ShowBalloonToast(POINTER pTitle, POINTER pMessage)
+DECLARE HideBalloonToast()
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': API Imports & Constants
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+DECLARE IMPORT, API_LineTo ALIAS "LineTo"(UINT hdc, INT x, INT y), INT
+DECLARE IMPORT, API_Ellipse ALIAS "Ellipse" (UINT hdc, INT left, INT top, INT right, INT bottom), INT
+DECLARE IMPORT, GetScrollPosA Alias "GetScrollPos"(HWND : INT, nBar : INT), INT
+DECLARE IMPORT, GetKeyStateA Alias "GetKeyState"(nVirtKey : INT), INT
+DECLARE IMPORT, SetFocusA Alias "SetFocus"(HWND as INT), INT
+DECLARE IMPORT, Win32GetProcessHeap ALIAS "GetProcessHeap" (), HANDLE
+DECLARE IMPORT, Win32HeapAlloc ALIAS "HeapAlloc" (HANDLE hHeap, DWORD dwFlags, DWORD dwBytes), POINTER
+DECLARE IMPORT, Win32HeapFree ALIAS "HeapFree" (HANDLE hHeap, DWORD dwFlags, POINTER lpMem), INT
+DECLARE IMPORT, Win32HeapReAlloc ALIAS "HeapReAlloc" (HANDLE hHeap, DWORD dwFlags, POINTER lpMem, DWORD dwBytes), POINTER
+
+CONST HEAP_ZERO_MEMORY = 0x00000008
+
+CONST FILE_READ_DATA        = 0x0001
+CONST FILE_SHARE_READ       = 0x00000001
+CONST OPEN_EXISTING         = 3
+CONST PAGE_READONLY         = 0x02
+CONST FILE_MAP_READ         = 0x04
+CONST INVALID_HANDLE_VALUE  = -1
+CONST CP_UTF8               = 65001
+CONST CP_ACP                = 0
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Scintilla Lexer & Style Constants (Win32 / IWBasic)
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+CONST SCLEX_PYTHON    = 2
+CONST SCLEX_CPP       = 3
+CONST SCLEX_ASM       = 34
+
+': Generic Style IDs
+CONST SCE_C_DEFAULT             = 0
+CONST SCE_C_COMMENT             = 1
+CONST SCE_C_COMMENTLINE         = 2
+CONST SCE_C_COMMENTDOC          = 3
+CONST SCE_C_NUMBER              = 4
+CONST SCE_C_WORD                = 5
+CONST SCE_C_STRING              = 6
+CONST SCE_C_CHARACTER           = 7
+CONST SCE_C_OPERATOR            = 10
+CONST SCE_C_WORD2               = 16
+
+CONST SCE_ASM_DEFAULT           = 0
+CONST SCE_ASM_COMMENT           = 1
+CONST SCE_ASM_NUMBER            = 2
+CONST SCE_ASM_STRING            = 3
+CONST SCE_ASM_OPERATOR          = 4
+CONST SCE_ASM_IDENTIFIER        = 5
+CONST SCE_ASM_CPUINSTRUCTION    = 6
+CONST SCE_ASM_MATHINSTRUCTION   = 7
+CONST SCE_ASM_REGISTER          = 8
+CONST SCE_ASM_DIRECTIVE         = 9
+CONST SCE_ASM_DIRECTIVEOPERAND  = 10
+CONST SCE_ASM_COMMENTBLOCK      = 11
+CONST SCE_ASM_CHARACTER         = 12
+CONST SCE_ASM_STRINGEOL         = 13
+CONST SCE_ASM_EXTINSTRUCTION    = 14
+
+GLOBAL UINT g_hUIFont = 0
+GLOBAL INT g_hEditorFont = 0  ' Global track handle for dynamic GDI editor font
+GLOBAL INT g_IsDirty = FALSE
+GLOBAL STRING g_CachedCaption$ = ""
+
+GLOBAL FILETIME g_LastFileWriteTime
+GLOBAL STRING g_CurrentLoadedPath
+GLOBAL INT g_IsFileMonitored = FALSE
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Compile-Time Initializers & Globals
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+STRING %APP_NAME = "Tpad"
+STRING %APP_VERSION = "1.0 [Final]"
+
+CONST ICON_SMALL = 0
+CONST ICON_BIG = 1
+
+GLOBAL INT gutterW = 64
+GLOBAL INT g_hBmpGutterRotated
+GLOBAL INT g_hbrGutter
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Subclass Pointer Isolation
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GLOBAL INT g_AboutOrig = 0
+GLOBAL INT g_FindOrig  = 0
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Bookmark System Constants & Global Storage (up to 65,536 lines)
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+$DEFINE MAX_BOOKMARK_LINES 65536
+GLOBAL DWORD g_BookmarkMask[2048]
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': File Monitoring Globals & Constants
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+$DEFINE FILE_MONITOR_TIMER_ID 3001
+$DEFINE FILE_MONITOR_INTERVAL 1000
+
+SETID "ENMKEYEVENTS", 0x10000
+SETID "ENMSGFILTER",  0x700
+SETID "MOUSE_OVER_MENU", 287
+
+WINDOW WIN, W0, W1
+DIALOG About, dlg_find, dlg_findreplace
+WINDOW search_win
+DIALOG search_dlg
+INT search_ctl
+
+STRING Cline, fName, newName, temp$, Filter$, STORED_STATUS_INFO
+STRING key, iniloc
+STRING Searchtext, gReplaceText
+
+INT STATUS_HEIGHT, HSCROLLPOS, ORIG, textW, textH
+INT Gutter_hDC, hdcMem, posL, posT, posW, posH, Save_As, RET, CancelAction
+INT Ruler_hDC, rhdcMem, rhbmMem, roldBmp, roldFont
+INT posLEFT, posTOP, posWIDTH, posHEIGHT
+INT hbrBackground, ghbrBackground
+INT subclassID = 12345
+INT subclassID2 = 12346
+
+INT match_case = 0
+INT match_word = 0
+INT firststart = 0
+INT startattop = 0
+INT found = 0
+
+UINT hBmp0, hBmp1, hBmp8, hIcon[2]
+GLOBAL WINRECT BRECT
+UINT g_hMenuBmps[15]
+UINT g_hMenuCheckedBmps[2]
+GLOBAL UINT g_hMruIconBmp = 0
+GLOBAL UINT g_hMruBinBmp = 0
+
+DynaStore ds
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Application Defaults Initialization
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+g_App.left = -9999
+g_App.top = -9999
+g_App.width = 640
+g_App.height = 480
+g_App.onTop = FALSE
+g_App.wordWrap = FALSE
+g_App.fontName = "Consolas"
+g_App.fontSize = 10
+g_App.fontWeight = 0
+g_App.fontFlags = 0
+g_App.isOverwrite = FALSE
+g_App.eolMode = "CRLF"
+g_App.themeID = 0
+
+INT mIdx
+For mIdx = 0 TO 4
+    g_App.mru[mIdx] = "Empty"
+    g_App.mruFlags[mIdx] = 0
+Next mIdx
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Explicit Scintilla Library Load
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+g_hSciLib = LoadLibraryA("SciLexer.dll")
+IF g_hSciLib = 0 THEN
+    MESSAGEBOX(0, "SciLexer.dll not found in application folder!", "Error", 0x10)
+    END
+ENDIF
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': CLI Argument Check
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Cline = GetCommandText()
+If Cline <> ""
+    INT n = argc()
+    If n = 1
+        RemoveQuotes()
+        fName = Cline
+    EndIf
+EndIf
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Resource Loading (Centralized & Path-Protected)
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+hIcon[0] = LoadImage("3small", @IMGICON)
+hIcon[1] = LoadImage("1a", @IMGICON)
+
+hBmp0 = LoadImage("brushed", @IMGBITMAP)
+hBmp8 = LoadImage("strip", @IMGBITMAP)
+
+IF hBmp0 <> 0 THEN
+    g_hBmpGutterRotated = RotateBitmap90(hBmp0)
+    g_hbrGutter         = CreatePatternBrush(g_hBmpGutterRotated)
+    hbrBackground       = CreatePatternBrush(hBmp0)
+ENDIF
+
+ghbrBackground = GetStockObject(NULL_BRUSH)
+
+Filter$ = "All Files (*.*)|*.*|Text Files (*.txt)|*.txt||"
+STORED_STATUS_INFO = "Ready..."
+
+If FileExists(GETSTARTPATH + "Tpad.ini") <> 0 THEN INIRead()
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Main Window Initialization
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+OPENWINDOW WIN, -9999, -9999, 640, 480, @Size|@MinBox|@MaxBox|@NOAUTODRAW|WS_CLIPCHILDREN, 0, "Tpad - [No Name]", &TpadHandler
+
+' Initialize UI Font Handle
+InitUIFont()
+InitAbout()
+Load_FindReplace()
+
+SetProp(WIN.hwnd, "TpadIcon", hIcon[1])
+SendMessage(WIN, WM_SETICON, ICON_BIG, hIcon[1])
+SendMessage(WIN, WM_SETICON, ICON_SMALL, hIcon[0])
+SetWindowColor(WIN, RGB(192, 192, 192))
+g_App.fontName = GetSafeMonoFont(g_App.fontName)
+SetFont WIN, g_App.fontName, g_App.fontSize, g_App.fontWeight, g_App.fontFlags
+GETTEXTSIZE(WIN, "0", textW, textH)
+
+CONTROL WIN, @EDIT, "Goto Line", 420, 3, 73, 20, 0x50802000, 101
+CONTROL WIN, @RGNBUTTON, "Go", 496, 3, 40, 20, 0x50000000, 102
+CONTROL WIN, @RGNBUTTON, "Top", 539, 3, 40, 20, 0x50000000, 103
+CONTROL WIN, @RGNBUTTON, "EOF", 582, 3, 40, 20, 0x50000000, 104
+
+ModifyExStyle(WIN, WS_BORDER, @EXCLIENTEDGE, 101)
+ReDrawFrame(WIN, 101)
+
+InjectUIFont(WIN.hwnd)
+
+INT hrgn0 = RGNFROMBITMAP("brgn_small")
+INT hrgn1 = RGNFROMBITMAP("brgn_small")
+INT hrgn2 = RGNFROMBITMAP("brgn_small")
+hBmp1 = LoadImage("brushed_btn", @IMGBITMAP)
+
+SETBUTTONRGN WIN, 102, hrgn0
+SETBUTTONRGN WIN, 103, hrgn1
+SETBUTTONRGN WIN, 104, hrgn2
+
+INT cid
+For cid = 102 TO 104
+    SETHTCOLOR WIN, cid, RGB(234, 230, 234)
+    SETBUTTONBITMAPS WIN, cid, hBmp1, 0, 0
+    SETBUTTONBORDER WIN, cid, 1
+Next cid
+
+SetControlColor WIN, 101, RGB(0, 0, 0), RGB(253, 246, 227)
+GetClientSize WIN, posLEFT, posTOP, posWIDTH, posHEIGHT
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Instantiate Scintilla Editor Control
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+UINT hInstScintilla = GetModuleHandleA(0)
+g_hSciCtrl = CreateWindowExA(0x20000, "Scintilla", "", 0x50010000, posLEFT, posTOP, posWIDTH, (posHEIGHT - 48), WIN.hwnd, IDC_SCI_CREATE, hInstScintilla, 0)
+Trace("Scintilla control id is -> " + STR$(IDC_SCI_CREATE))
+IF g_hSciCtrl = 0 THEN
+    MESSAGEBOX(WIN, "Failed to create Scintilla control window.", "Error", 0x10)
+    END
+ENDIF
+SetParent(g_hSciCtrl, WIN.hwnd)
+SendMessageA(g_hSciCtrl, SCI_SETMODEVENTMASK, SC_MODEVENTMASKALL, 0)
+SendMessageA(g_hSciCtrl, SCI_SETCODEPAGE, SC_CP_UTF8, 0)
+SendMessageA(g_hSciCtrl, SCI_SETLEXER, SCLEX_NULL, 0)
+ConfigureScintillaDefaults()
+ORIG = GetWindowLongA(g_hSciCtrl, GWL_WNDPROC)
+SetWindowLongA(g_hSciCtrl, GWL_WNDPROC, &EDIT)
+
+CONTROL WIN, @STATUS, "Ready...", 0, 0, 0, 0, 0, STATUS_1
+ModifyExStyle(WIN, SBT_POPOUT|SBT_NOBORDERS|SBARS_TOOLTIPS, 0, STATUS_1)
+ReDrawFrame(WIN, STATUS_1)
+
+INT PARTS[7]
+PARTS = posWIDTH - 340, posWIDTH - 260, posWIDTH - 200, posWIDTH - 140, posWIDTH - 95, posWIDTH - 50, -1
+CONTROLCMD WIN, STATUS_1, @SWSETPANES, 7, PARTS
+
+HINSTANCE hInst = GetModuleHandleA(0)
+HMENU hResMenu  = LoadMenuA(hInst, 1000)
+
+IF hResMenu <> 0 THEN
+    SetMenuA(WIN.hwnd, hResMenu)
+
+    IF IsRunningUnderWine() = FALSE THEN
+        IF hbrBackground <> 0 THEN
+            g_WndMenu.SetTextureBrush(hbrBackground)
+        ENDIF
+    ENDIF
+
+    IF g_hUIFont <> 0 THEN g_WndMenu.SetMenuFont(g_hUIFont)
+    g_WndMenu.AttachMenu(WIN.hwnd, hResMenu)
+
+    IF IsRunningUnderWine() = FALSE THEN
+        UINT hSysMenu = GetSystemMenu(WIN.hwnd, FALSE)
+        IF hSysMenu <> 0 THEN g_WndMenu.SkinSubmenus(hSysMenu)
+    ENDIF
+
+    DrawMenuBar(WIN.hwnd)
+ENDIF
+
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("N"), CMD_NEW
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("O"), CMD_OPEN
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("S"), CMD_SAVEAS
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("P"), CMD_PRINT
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("Z"), CMD_UNDO
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("Y"), CMD_REDO
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("X"), CMD_CUT
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("C"), CMD_COPY
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("V"), CMD_PASTE
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("A"), CMD_SELECTALL
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("F"), CMD_FIND
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("H"), CMD_REPLACE
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("W"), CMD_WORDWRAP
+ADDACCELERATOR WIN, @FCONTROL | @FVIRTKEY, ASC("T"), CMD_ONTOP
+ADDACCELERATOR WIN, @FVIRTKEY, 0x70, CMD_ABOUT
+ADDACCELERATOR WIN, @FVIRTKEY, 0x1B, CMD_EXIT  ' 0x1B = VK_ESCAPE
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Fletchie's Control Pak Toolbar Setup
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+UINT hToolBar, hInstance, himl[7]
+TBBUTTON ttbb[16]
+
+hInstance = GetModuleHandleA(0)
+
+hToolBar = CreateWindowExA(0x0, "toolbarwindow32", "", _
+    WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS, _
+    0, 0, 325, 26, WIN.hwnd, 2000, hInstance, 0)
+
+SendMessage(hToolBar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS | TBSTYLE_EX_MIXEDBUTTONS)
+
+himl[4] = conLoadImages("strip", 16, 0)
+SendMessage(hToolBar, TB_SETIMAGELIST, 2000, himl[4])
+
+' 1. Generate the modified bitmaps in memory
+INT hBmpHot      = CreateHotToolbarBitmap(hBmp8)
+INT hBmpDisabled = CreateDisabledToolbarBitmap(hBmp8)
+
+' 2. Create Win32 Image Lists (16x16 icon size)
+UINT himlHot      = ImageList_Create(16, 16, ILC_COLOR8 | ILC_MASK, 15, 5)
+UINT himlDisabled = ImageList_Create(16, 16, ILC_COLOR8 | ILC_MASK, 15, 5)
+
+' 3. Add the bitmaps to the image lists with background color mask (e.g., RGB 192, 192, 192)
+ImageList_AddMasked(himlHot, hBmpHot, RGB(255, 0, 255))
+SendMessage(hToolBar, TB_SETHOTIMAGELIST, 2000, himlHot)
+
+ImageList_AddMasked(himlDisabled, hBmpDisabled, RGB(255, 0, 255))
+SendMessage(hToolBar, TB_SETDISABLEDIMAGELIST, 2000, himlDisabled)
+
+ControlCMD WIN, hToolBar, @TBSETBITMAPSIZE, 16, 16
+SendMessage(hToolBar, TB_BUTTONSTRUCTSIZE, Len(ttbb[0]), 0)
+
+ttbb[0].iBitmap   = 12 : ttbb[0].idCommand  = 0             : ttbb[0].fsState  = TBSTATE_ENABLED : ttbb[0].fsStyle  = BTNS_SEP     : ttbb[0].dwData = 0 : ttbb[0]._iString = -1
+
+ttbb[1].iBitmap   = 0  : ttbb[1].idCommand  = CMD_NEW      : ttbb[1].fsState  = TBSTATE_ENABLED : ttbb[1].fsStyle  = BTNS_BUTTON    : ttbb[1].dwData = 0 : ttbb[1]._iString = -1
+ttbb[2].iBitmap   = 1  : ttbb[2].idCommand  = CMD_OPEN     : ttbb[2].fsState  = TBSTATE_ENABLED : ttbb[2].fsStyle  = BTNS_DROPDOWN : ttbb[2].dwData = 0 : ttbb[2]._iString = -1
+ttbb[3].iBitmap   = 2  : ttbb[3].idCommand  = CMD_SAVEAS   : ttbb[3].fsState  = TBSTATE_ENABLED : ttbb[3].fsStyle  = BTNS_BUTTON    : ttbb[3].dwData = 0 : ttbb[3]._iString = -1
+ttbb[4].iBitmap   = 3  : ttbb[4].idCommand  = CMD_CUT      : ttbb[4].fsState  = TBSTATE_ENABLED : ttbb[4].fsStyle  = BTNS_BUTTON    : ttbb[4].dwData = 0 : ttbb[4]._iString = -1
+ttbb[5].iBitmap   = 4  : ttbb[5].idCommand  = CMD_COPY     : ttbb[5].fsState  = TBSTATE_ENABLED : ttbb[5].fsStyle  = BTNS_BUTTON    : ttbb[5].dwData = 0 : ttbb[5]._iString = -1
+ttbb[6].iBitmap   = 5  : ttbb[6].idCommand  = CMD_PASTE    : ttbb[6].fsState  = TBSTATE_ENABLED : ttbb[6].fsStyle  = BTNS_BUTTON    : ttbb[6].dwData = 0 : ttbb[6]._iString = -1
+ttbb[7].iBitmap   = 6  : ttbb[7].idCommand  = CMD_UNDO     : ttbb[7].fsState  = TBSTATE_ENABLED : ttbb[7].fsStyle  = BTNS_BUTTON    : ttbb[7].dwData = 0 : ttbb[7]._iString = -1
+ttbb[8].iBitmap   = 7  : ttbb[8].idCommand  = CMD_REDO     : ttbb[8].fsState  = TBSTATE_ENABLED : ttbb[8].fsStyle  = BTNS_BUTTON    : ttbb[8].dwData = 0 : ttbb[8]._iString = -1
+ttbb[9].iBitmap   = 8  : ttbb[9].idCommand  = CMD_PRINT    : ttbb[9].fsState  = TBSTATE_ENABLED : ttbb[9].fsStyle  = BTNS_BUTTON    : ttbb[9].dwData = 0 : ttbb[9]._iString = -1
+ttbb[10].iBitmap  = 9  : ttbb[10].idCommand = CMD_FIND     : ttbb[10].fsState = TBSTATE_ENABLED : ttbb[10].fsStyle = BTNS_BUTTON  : ttbb[10].dwData = 0 : ttbb[10]._iString = -1
+ttbb[11].iBitmap  = 10 : ttbb[11].idCommand = CMD_REPLACE  : ttbb[11].fsState = TBSTATE_ENABLED : ttbb[11].fsStyle = BTNS_BUTTON  : ttbb[11].dwData = 0 : ttbb[11]._iString = -1
+ttbb[12].iBitmap  = 11 : ttbb[12].idCommand = CMD_PROPERTIES: ttbb[12].fsState = TBSTATE_ENABLED : ttbb[12].fsStyle = BTNS_BUTTON  : ttbb[12].dwData = 0 : ttbb[12]._iString = -1
+ttbb[13].iBitmap  = 12 : ttbb[13].idCommand = CMD_WORDWRAP : ttbb[13].fsState = TBSTATE_ENABLED : ttbb[13].fsStyle = TBSTYLE_CHECK: ttbb[13].dwData = 0 : ttbb[13]._iString = -1
+ttbb[14].iBitmap  = 13 : ttbb[14].idCommand = CMD_FONT     : ttbb[14].fsState = TBSTATE_ENABLED : ttbb[14].fsStyle = BTNS_BUTTON  : ttbb[14].dwData = 0 : ttbb[14]._iString = -1
+ttbb[15].iBitmap  = 14 : ttbb[15].idCommand = CMD_ONTOP    : ttbb[15].fsState = TBSTATE_ENABLED : ttbb[15].fsStyle = TBSTYLE_CHECK: ttbb[15].dwData = 0 : ttbb[15]._iString = -1
+
+INT tbb
+For tbb = 0 TO 15
+    SendMessage(hToolBar, TB_ADDBUTTONS, 1, &ttbb[tbb])
+Next tbb
+
+SendMessage(hToolBar, TB_AUTOSIZE, 0, 0)
+
+STRING Tip[15]
+Tip = "New", "Open", "Save", "Cut", "Copy", "Paste", "Undo", "Redo", "Print", "Find", "Replace", "Properties", "Word Wrap", "Font", "On Top"
+
+For tbb = 0 TO 14
+    ControlCMD WIN, 2000, @TBSETTIP, ttbb[tbb].idCommand, Tip[tbb - 1]
+Next tbb
+
+ControlCMD WIN, 2000, @TBENABLEBUTTON, 3, 0
+
+AttachCustomMenuBitmaps()
+
+If g_App.onTop Then
+    SendMessage(WIN, TB_CHECKBUTTON, CMD_ONTOP, TRUE, 2000)
+    CHECKMENUITEM WIN, CMD_ONTOP, 1
+    WindowOnTop(WIN.hwnd, 1)
+Else
+    SendMessage(WIN, TB_CHECKBUTTON, CMD_ONTOP, FALSE, 2000)
+    CHECKMENUITEM WIN, CMD_ONTOP, 0
+    WindowOnTop(WIN.hwnd, 0)
+EndIf
+
+If g_App.wordWrap Then
+    SendMessage(WIN, TB_CHECKBUTTON, CMD_WORDWRAP, TRUE, 2000)
+    CHECKMENUITEM WIN, CMD_WORDWRAP, 1
+    IF g_hSciCtrl <> 0 THEN SendMessageA(g_hSciCtrl, SCI_SETWRAPMODE, SC_WRAP_WORD, 0)
+Else
+    SendMessage(WIN, TB_CHECKBUTTON, CMD_WORDWRAP, FALSE, 2000)
+    CHECKMENUITEM WIN, CMD_WORDWRAP, 0
+    IF g_hSciCtrl <> 0 THEN SendMessageA(g_hSciCtrl, SCI_SETWRAPMODE, SC_WRAP_NONE, 0)
+EndIf
+
+InitGutter()
+InitRuler()
+DynaNew(ds, 0, 1)
+AllowFileDrop(WIN.hwnd, True)
+
+If fName <> "" THEN
+    DoOpen()
+ELSE
+    FileNew()
+ENDIF
+
+If FileExists(GETSTARTPATH + "Tpad.ini") <> 0
+    SETSIZE WIN, g_App.left, g_App.top, g_App.width, g_App.height
+Else
+    CENTERWINDOW WIN
+EndIf
+
+ApplyThemeStyles(g_App.themeID)
+DoResize()
+SetFocusA(g_hSciCtrl)
+Trace("Tpad started !")
+ONEXIT(&CleanupAppResources, NULL)
+WAITUNTIL WIN = 0
+END
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Clean up resources, Free Scintilla DLL and Close Everything Proper
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DoEndProgram()
+    IF WIN.hwnd <> 0 THEN
+        StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+        StopTimer(WIN, BALLOON_DISMISS_TIMER_ID)
+    ENDIF
+
+    IF g_hwndToolTip <> 0 THEN
+        DestroyWindow(g_hwndToolTip)
+        g_hwndToolTip = 0
+    ENDIF
+
+    IF W1.hwnd <> 0 THEN RemoveWindowSubclass(W1.hwnd, &subclassProc, subclassID)
+    IF W0.hwnd <> 0 THEN RemoveWindowSubclass(W0.hwnd, &subclassProc, subclassID2)
+
+    IF (g_hSciCtrl <> 0) AND (ORIG <> NULL) THEN
+        SetWindowLongA(g_hSciCtrl, -4, ORIG)
+        ORIG = NULL
+    ENDIF
+
+    IF hToolBar <> 0 THEN DestroyWindow(hToolBar)
+
+    IF W0.hwnd <> 0 THEN CLOSEWINDOW W0
+    IF W1.hwnd <> 0 THEN CLOSEWINDOW W1
+    IF WIN.hwnd <> 0 THEN CLOSEWINDOW WIN
+
+    CleanupAppResources(NULL)
+ENDSUB
+
+SUB CleanupAppResources(POINTER pData), INT
+
+    CleanupUIFont()
+    DeleteObject(hBmpHot)
+    DeleteObject(hBmpDisabled)
+
+    IF (g_hEditorFont <> 0) THEN
+        DeleteObject(g_hEditorFont)
+        g_hEditorFont = 0
+    ENDIF
+
+    DynaDelete(ds)
+
+
+    INT idx
+    FOR idx = 0 TO 14
+        IF g_hMenuBmps[idx] <> 0 THEN
+            DeleteObject(g_hMenuBmps[idx])
+            g_hMenuBmps[idx] = 0
+        ENDIF
+    NEXT idx
+
+    FOR idx = 0 TO 1
+        IF g_hMenuCheckedBmps[idx] <> 0 THEN
+            DeleteObject(g_hMenuCheckedBmps[idx])
+            g_hMenuCheckedBmps[idx] = 0
+        ENDIF
+    NEXT idx
+
+    IF g_hMruIconBmp <> 0 THEN
+        DeleteObject(g_hMruIconBmp)
+        g_hMruIconBmp = 0
+    ENDIF
+
+    IF g_hMruBinBmp <> 0 THEN
+        DeleteObject(g_hMruBinBmp)
+        g_hMruBinBmp = 0
+    ENDIF
+
+    IF himlHot <> 0 THEN
+       ImageList_Destroy(himlHot)
+    ENDIF
+
+    IF himlDisabled <> 0 THEN
+       ImageList_Destroy(himlDisabled)
+    ENDIF
+
+    IF g_hbrGutter <> 0 THEN
+        DeleteObject(g_hbrGutter)
+        g_hbrGutter = 0
+    ENDIF
+
+    IF hbrBackground <> 0 THEN
+        DeleteObject(hbrBackground)
+        hbrBackground = 0
+    ENDIF
+
+    IF g_hBmpGutterRotated <> 0 THEN
+        DeleteObject(g_hBmpGutterRotated)
+        g_hBmpGutterRotated = 0
+    ENDIF
+
+    IF g_hRulerFont        <> 0 THEN DeleteObject(g_hRulerFont)        : g_hRulerFont = 0
+    IF g_hRulerSepPen      <> 0 THEN DeleteObject(g_hRulerSepPen)      : g_hRulerSepPen = 0
+    IF g_hRulerPolePen     <> 0 THEN DeleteObject(g_hRulerPolePen)     : g_hRulerPolePen = 0
+    IF g_hRulerFlagPen     <> 0 THEN DeleteObject(g_hRulerFlagPen)     : g_hRulerFlagPen = 0
+    IF g_hRulerFlagBrush   <> 0 THEN DeleteObject(g_hRulerFlagBrush)   : g_hRulerFlagBrush = 0
+    IF g_hRulerArrowPen    <> 0 THEN DeleteObject(g_hRulerArrowPen)    : g_hRulerArrowPen = 0
+    IF g_hRulerEraserPen   <> 0 THEN DeleteObject(g_hRulerEraserPen)   : g_hRulerEraserPen = 0
+    IF g_hRulerEraserBrush <> 0 THEN DeleteObject(g_hRulerEraserBrush) : g_hRulerEraserBrush = 0
+
+    DELETEIMAGE hIcon[0], @IMGICON
+    DELETEIMAGE hIcon[1], @IMGICON
+    DELETEIMAGE hIcon[2], @IMGICON
+    DELETEIMAGE himl[4], @IMGBITMAP
+    DELETEIMAGE hBmp0, @IMGBITMAP
+    DELETEIMAGE hBmp1, @IMGBITMAP
+    DELETEIMAGE hBmp8, @IMGBITMAP
+
+    IF About.hwnd <> 0 THEN RemoveProp(About.hwnd, "AboutIcon")
+    IF WIN.hwnd <> 0 THEN RemoveProp(WIN.hwnd, "TpadIcon")
+
+    IF g_hSciLib <> 0 THEN
+        FreeLibrary(g_hSciLib)
+        g_hSciLib = 0
+    ENDIF
+
+    RETURN 0
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Balloon Toast Overlay Routines
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB ShowBalloonToast(POINTER pTitle, POINTER pMessage)
+    IF g_hwndToolTip = 0 OR WIN.hwnd = 0 OR pMessage = NULL THEN RETURN
+
+    STOPTIMER WIN, BALLOON_DISMISS_TIMER_ID
+
+    STATIC ISTRING szStaticTitle[128]
+    STATIC ISTRING szStaticMsg[512]
+
+    lstrcpynA(&szStaticTitle, pTitle, 127)
+    lstrcpynA(&szStaticMsg, pMessage, 511)
+
+    TOOLINFO_BALLOON ti
+    RtlZeroMemory(&ti, LEN(ti))
+    ti.cbSize   = LEN(ti)
+    ti.uFlags   = TTF_TRACK | TTF_ABSOLUTE
+    ti.hwnd     = WIN.hwnd
+    ti.uId      = 1
+    ti.lpszText = &szStaticMsg
+
+    SendMessageA(g_hwndToolTip, TTM_DELTOOLA, 0, &ti)
+    SendMessageA(g_hwndToolTip, TTM_ADDTOOLA, 0, &ti)
+    SendMessageA(g_hwndToolTip, TTM_SETTITLEA, 1, &szStaticTitle)
+
+    WINRECT rcWin
+    GetWindowRect(WIN.hwnd, &rcWin)
+
+    INT px = rcWin.right - 140
+    INT py = rcWin.top + 70
+
+    SendMessageA(g_hwndToolTip, TTM_TRACKPOSITION, 0, (py << 16) | (px & 0xFFFF))
+    SendMessageA(g_hwndToolTip, TTM_TRACKACTIVATE, TRUE, &ti)
+
+    STARTTIMER WIN, 3500, BALLOON_DISMISS_TIMER_ID
+ENDSUB
+
+SUB HideBalloonToast()
+    IF g_hwndToolTip = 0 THEN RETURN
+
+    TOOLINFO_BALLOON ti
+    RtlZeroMemory(&ti, LEN(ti))
+    ti.cbSize = LEN(ti)
+    ti.hwnd   = WIN.hwnd
+    ti.uId    = 1
+
+    SendMessageA(g_hwndToolTip, TTM_TRACKACTIVATE, FALSE, &ti)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Helper Routines
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB SafeAllocHeap(DWORD sizeInBytes), POINTER
+    HANDLE hHeap = Win32GetProcessHeap()
+    IF hHeap = NULL THEN RETURN NULL
+    RETURN Win32HeapAlloc(hHeap, HEAP_ZERO_MEMORY, sizeInBytes)
+ENDSUB
+
+SUB SafeFreeHeap(POINTER pMem)
+    IF pMem = NULL THEN RETURN
+    HANDLE hHeap = Win32GetProcessHeap()
+    IF hHeap <> NULL THEN
+        Win32HeapFree(hHeap, 0, pMem)
+    ENDIF
+ENDSUB
+
+SUB ToggleOnTop()
+    g_App.onTop = NOT g_App.onTop
+    If g_App.onTop Then
+        SendMessage(WIN, TB_CHECKBUTTON, CMD_ONTOP, TRUE, 2000)
+        CHECKMENUITEM WIN, CMD_ONTOP, 1
+        WindowOnTop(WIN.hwnd, 1)
+    Else
+        SendMessage(WIN, TB_CHECKBUTTON, CMD_ONTOP, FALSE, 2000)
+        CHECKMENUITEM WIN, CMD_ONTOP, 0
+        WindowOnTop(WIN.hwnd, 0)
+    EndIf
+EndSub
+
+SUB ToggleWordWrap()
+    g_App.wordWrap = NOT g_App.wordWrap
+    If g_App.wordWrap Then
+        SendMessage(WIN, TB_CHECKBUTTON, CMD_WORDWRAP, TRUE, 2000)
+        CHECKMENUITEM WIN, CMD_WORDWRAP, 1
+        SendMessageA(g_hSciCtrl, SCI_SETWRAPMODE, SC_WRAP_WORD, 0)
+    Else
+        SendMessage(WIN, TB_CHECKBUTTON, CMD_WORDWRAP, FALSE, 2000)
+        CHECKMENUITEM WIN, CMD_WORDWRAP, 0
+        SendMessageA(g_hSciCtrl, SCI_SETWRAPMODE, SC_WRAP_NONE, 0)
+    EndIf
+    UpdateGutter()
+    InvalidateRect(WIN.hwnd, NULL, TRUE)
+    InvalidateRect(W1.hwnd, NULL, TRUE)
+EndSub
+
+SUB OpenFontDialog()
+    STRING chosenFont$
+    INT vSize, vWeight, vFlags, vColor
+
+    vSize = g_App.fontSize
+    vWeight = g_App.fontWeight
+    vFlags = g_App.fontFlags
+    vColor = RGB(0, 0, 0)
+
+    chosenFont$ = FONTREQUEST(WIN, vSize, vWeight, vFlags, vColor, g_App.fontName)
+
+    If chosenFont$ <> "" Then
+        g_App.fontName   = chosenFont$
+        g_App.fontSize   = vSize
+        g_App.fontWeight = vWeight
+        g_App.fontFlags  = vFlags
+
+        IF g_hSciCtrl <> 0 THEN
+            ISTRING fontBuf[64]
+            fontBuf = g_App.fontName
+
+            ' 1. Update default style and line number margin style
+            SendMessageA(g_hSciCtrl, SCI_STYLESETFONT, STYLE_DEFAULT, &fontBuf)
+            SendMessageA(g_hSciCtrl, SCI_STYLESETSIZE, STYLE_DEFAULT, g_App.fontSize)
+            SendMessageA(g_hSciCtrl, SCI_STYLESETFONT, STYLE_LINENUMBER, &fontBuf)
+            SendMessageA(g_hSciCtrl, SCI_STYLESETSIZE, STYLE_LINENUMBER, g_App.fontSize)
+
+            ' 2. Apply new font name & size to all lexer styles (0 to 31) without wiping colors
+            INT i
+            FOR i = 0 TO 31
+                SendMessageA(g_hSciCtrl, SCI_STYLESETFONT, i, &fontBuf)
+                SendMessageA(g_hSciCtrl, SCI_STYLESETSIZE, i, g_App.fontSize)
+            NEXT i
+
+            ' 3. Refresh editor buffer
+            SendMessageA(g_hSciCtrl, SCI_COLOURISE, 0, -1)
+        ENDIF
+
+        IF g_hRulerFont <> 0 THEN DeleteObject(g_hRulerFont)
+        INT fHeight = textH
+        IF fHeight <= 0 THEN fHeight = 15
+        g_hRulerFont = CreateFont(fHeight, 0, 0, 0, g_App.fontWeight, (g_App.fontFlags & 2), (g_App.fontFlags & 4), 0, 0, 0, 0, 0, 0, g_App.fontName)
+
+        DoResize()
+        InvalidateRect(WIN.hwnd, NULL, TRUE)
+        InvalidateRect(W0.hwnd, NULL, TRUE)
+
+        'INIWrite()
+    EndIf
+EndSub
+
+SUB AttachCustomMenuBitmaps()
+    UINT hMenu = GetMenu(WIN.hwnd)
+    If hMenu = 0 Then RETURN 
+
+    INT imgCount = ImageList_GetImageCount(himl[4])
+    If imgCount < 15 Then RETURN 
+
+    INT hDC = GetDC(WIN.hwnd)
+    INT idx
+    WINRECT rcBounds
+    rcBounds.left = 0 : rcBounds.top = 0 : rcBounds.right = 16 : rcBounds.bottom = 16
+
+    For idx = 0 TO 14
+        INT hMemDC = CreateCompatibleDC(hDC)
+        g_hMenuBmps[idx] = CreateCompatibleBitmap(hDC, 16, 16)
+        INT hOldBmp = SelectObject(hMemDC, g_hMenuBmps[idx])
+        
+        FillRect(hMemDC, rcBounds, GetSysColorBrush(COLOR_MENU))
+        
+        INT hIconGlyph = ImageList_GetIcon(himl[4], idx, ILD_NORMAL)
+        If hIconGlyph <> 0 Then
+            DrawIconEx(hMemDC, 0, 0, hIconGlyph, 16, 16, 0, 0, DI_NORMAL)
+        EndIf
+        
+        IF (idx = 12) OR (idx = 14)
+            INT checkIdx = (idx = 12) ? 0 : 1
+            g_hMenuCheckedBmps[checkIdx] = CreateCompatibleBitmap(hDC, 16, 16)
+            
+            SelectObject(hMemDC, g_hMenuCheckedBmps[checkIdx])
+            FillRect(hMemDC, rcBounds, GetSysColorBrush(COLOR_3DFACE))
+            
+            INT hPenDark  = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DSHADOW))
+            INT hPenLight = CreatePen(PS_SOLID, 1, GetSysColor(COLOR_3DHIGHLIGHT))
+            INT hOldPen = SelectObject(hMemDC, hPenDark)
+            MoveToEx(hMemDC, 0, 15, NULL) : _LineTo(hMemDC, 0, 0) : _LineTo(hMemDC, 15, 0)
+            SelectObject(hMemDC, hPenLight)
+            MoveToEx(hMemDC, 15, 0, NULL) : _LineTo(hMemDC, 15, 15) : _LineTo(hMemDC, 0, 15)
+            
+            If hIconGlyph <> 0 Then
+                DrawIconEx(hMemDC, 1, 1, hIconGlyph, 15, 15, 0, 0, DI_NORMAL)
+            EndIf
+            
+            SelectObject(hMemDC, hOldPen)
+            DeleteObject(hPenDark)
+            DeleteObject(hPenLight)
+        EndIf
+
+        If hIconGlyph <> 0 Then DestroyIcon(hIconGlyph)
+        SelectObject(hMemDC, hOldBmp)
+        DeleteDC(hMemDC)
+    Next idx
+
+    ReleaseDC(WIN.hwnd, hDC)
+
+    SetMenuItemBitmaps(hMenu, CMD_NEW,        MF_BYCOMMAND, g_hMenuBmps[0],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_OPEN,       MF_BYCOMMAND, g_hMenuBmps[1],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_SAVEAS,     MF_BYCOMMAND, g_hMenuBmps[2],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_CUT,        MF_BYCOMMAND, g_hMenuBmps[3],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_COPY,       MF_BYCOMMAND, g_hMenuBmps[4],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_PASTE,      MF_BYCOMMAND, g_hMenuBmps[5],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_UNDO,       MF_BYCOMMAND, g_hMenuBmps[6],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_REDO,       MF_BYCOMMAND, g_hMenuBmps[7],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_PRINT,      MF_BYCOMMAND, g_hMenuBmps[8],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_FIND,       MF_BYCOMMAND, g_hMenuBmps[9],  NULL)
+    SetMenuItemBitmaps(hMenu, CMD_REPLACE,    MF_BYCOMMAND, g_hMenuBmps[10], NULL)
+    SetMenuItemBitmaps(hMenu, CMD_PROPERTIES, MF_BYCOMMAND, g_hMenuBmps[11], NULL)
+    SetMenuItemBitmaps(hMenu, CMD_FONT,       MF_BYCOMMAND, g_hMenuBmps[13], NULL)
+
+    SetMenuItemBitmaps(hMenu, CMD_WORDWRAP,   MF_BYCOMMAND, g_hMenuBmps[12], g_hMenuCheckedBmps[0])
+    SetMenuItemBitmaps(hMenu, CMD_ONTOP,      MF_BYCOMMAND, g_hMenuBmps[14], g_hMenuCheckedBmps[1])
+
+    ' Convert loaded 16x16 icon (hIcon[0]) to HBITMAP for SetMenuItemBitmaps
+    IF hIcon[0] <> 0 AND g_hMruIconBmp = 0 THEN
+        hDC = GetDC(WIN.hwnd)
+        hMemDC = CreateCompatibleDC(hDC)
+        g_hMruIconBmp = CreateCompatibleBitmap(hDC, 16, 16)
+        
+        hOldBmp = SelectObject(hMemDC, g_hMruIconBmp)
+        WINRECT rc
+        rc.left = 0 : rc.top = 0 : rc.right = 16 : rc.bottom = 16
+        FillRect(hMemDC, &rc, GetSysColorBrush(COLOR_MENU))
+        
+        DrawIconEx(hMemDC, 0, 0, hIcon[0], 16, 16, 0, 0, DI_NORMAL)
+        
+        SelectObject(hMemDC, hOldBmp)
+        DeleteDC(hMemDC)
+        ReleaseDC(WIN.hwnd, hDC)
+    ENDIF
+
+    UINT hIconBin = LoadImage("4bin", @IMGICON)
+    IF hIconBin <> 0 AND g_hMruBinBmp = 0 THEN
+        hDC = GetDC(WIN.hwnd)
+        hMemDC = CreateCompatibleDC(hDC)
+        g_hMruBinBmp = CreateCompatibleBitmap(hDC, 16, 16)
+        
+        hOldBmp = SelectObject(hMemDC, g_hMruBinBmp)
+        WINRECT rcBin
+        rcBin.left = 0 : rcBin.top = 0 : rcBin.right = 16 : rcBin.bottom = 16
+        FillRect(hMemDC, &rcBin, GetSysColorBrush(COLOR_MENU))
+        
+        DrawIconEx(hMemDC, 0, 0, hIconBin, 16, 16, 0, 0, DI_NORMAL)
+        
+        SelectObject(hMemDC, hOldBmp)
+        DeleteDC(hMemDC)
+        ReleaseDC(WIN.hwnd, hDC)
+        
+        ' Free the temporary icon handle
+        DestroyIcon(hIconBin)
+    ENDIF
+ENDSUB
+
+SUB SyncThemeMenuCheck(INT selectedID)
+    UINT hMenu = GetMenu(WIN.hwnd)
+    IF hMenu <> 0 THEN
+        CheckMenuRadioItem(hMenu, 30, 31, selectedID, MF_BYCOMMAND)
+        DrawMenuBar(WIN.hwnd)
+    ENDIF
+ENDSUB
+
+SUB SyncSyntaxMenuCheck(INT selectedID)
+    UINT hMenu = GetMenu(WIN.hwnd)
+    IF hMenu <> 0 THEN
+        CheckMenuRadioItem(hMenu, 32, 36, selectedID, MF_BYCOMMAND)
+        DrawMenuBar(WIN.hwnd)
+    ENDIF
+ENDSUB
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Main Window Handler
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB TpadHandler(), INT
+
+    INT hasMruItems = FALSE
+    UINT clearFlags = 0
+
+    Select @MESSAGE
+
+        CASE WM_INITMENUPOPUP:
+        ' hMenuPassed is lParam (or wParam depending on wrapper)
+        ' Check if the popup being opened is the Edit menu
+        INT canUndo = SendMessage(g_hSciCtrl, SCI_CANUNDO, 0, 0)
+        INT canRedo = SendMessage(g_hSciCtrl, SCI_CANREDO, 0, 0)
+
+        ENABLEMENUITEM WIN, CMD_UNDO, canUndo
+        ENABLEMENUITEM WIN, CMD_REDO, canRedo
+
+        CASE WM_ENTERSIZEMOVE
+            g_IsResizing = TRUE
+            RETURN 0
+
+        CASE WM_EXITSIZEMOVE
+            g_IsResizing = FALSE
+            SendMessage(hToolBar, TB_AUTOSIZE, 0, 0)
+            DoResize()
+            UpdateGutter()
+            DrawRuler()
+            RETURN 0
+
+        Case 32800 
+            IF g_IsLoading = FALSE THEN
+                IF SendMessageA(g_hSciCtrl, SCI_GETMODIFY, 0, 0) <> 0 THEN
+                    IF g_IsDirty = FALSE THEN
+                        g_IsDirty = TRUE
+                        UpdateTitleBar()
+                    ENDIF
+                ENDIF
+
+                UpdateStatusBar()
+                UpdateGutter()
+                DrawRuler()
+            ENDIF
+            RETURN 0
+
+        Case @IDCLOSEWINDOW
+            CancelAction = FALSE
+            IsFileChanged()
+            If CancelAction = TRUE THEN RETURN 0
+            INIWrite()
+            IF WIN.hwnd <> 0 THEN
+                StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+                StopTimer(WIN, BALLOON_DISMISS_TIMER_ID)
+            ENDIF
+
+            DoEndProgram()
+            PostQuitMessage(0)
+            RETURN 0
+
+        Case WM_SETFOCUS
+            SetFocusA(g_hSciCtrl)
+
+        Case @IDDROPFILES
+
+            GetDroppedFiles(ds, 1)
+
+            IF LEN(ds) > 0 THEN
+                DynaGetStr(ds, 0, fName)
+                Trace("File dropped ! " + fName)
+                IF LEN(fName) > 0 THEN
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = TRUE THEN RETURN 0
+
+                    DoOpen()
+
+                    SendMessage(WIN, WM_ACTIVATEAPP, 0, 0)
+                    SetForegroundWindow(WIN.hwnd)
+                    SetFocusA(g_hSciCtrl)
+                ENDIF
+            ENDIF
+
+        Case @IDERASEBACKGROUND
+            GetClientSize WIN, posLEFT, posTOP, posWIDTH, posHEIGHT
+            INT hdcWin = GETHDC(WIN)
+    
+            IF hdcWin <> 0 THEN
+                WINRECT ETO
+                ETO.LEFT = 0 : ETO.TOP = 0 : ETO.RIGHT = posWIDTH : ETO.BOTTOM = posHEIGHT
+        
+                IF hbrBackground <> 0 THEN
+                    FillRect(hdcWin, &ETO, hbrBackground)
+                ELSE
+                    FillRect(hdcWin, &ETO, GetSysColorBrush(15))
+                ENDIF
+
+                TRIVERTEX vert[2]
+                GRADIENT_RECT gRect
+                vert[0].x = 0        : vert[0].y = 0  : vert[0].Red = 0xF400 : vert[0].Green = 0xF200 : vert[0].Blue = 0xF400 : vert[0].Alpha = 0
+                vert[1].x = posWIDTH : vert[1].y = 26 : vert[1].Red = 0xC800 : vert[1].Green = 0xC400 : vert[1].Blue = 0xC800 : vert[1].Alpha = 0
+                gRect.UpperLeft = 0 : gRect.LowerRight = 1
+                GradientFill(hdcWin, &vert[0], 2, &gRect, 1, GRADIENT_FILL_RECT_V)
+
+                TRIVERTEX vertHandle[2]
+                GRADIENT_RECT gRectHandle
+                vertHandle[0].x = 0  : vertHandle[0].y = 0  : vertHandle[0].Red = 0xD800 : vertHandle[0].Green = 0xD000 : vertHandle[0].Blue = 0xD800 : vertHandle[0].Alpha = 0
+                vertHandle[1].x = 10 : vertHandle[1].y = 26 : vertHandle[1].Red = 0xA000 : vertHandle[1].Green = 0x9C00 : vertHandle[1].Blue = 0xA000 : vertHandle[1].Alpha = 0
+                gRectHandle.UpperLeft = 0 : gRectHandle.LowerRight = 1
+                GradientFill(hdcWin, &vertHandle[0], 2, &gRectHandle, 1, GRADIENT_FILL_RECT_H)
+
+                INT hPenShadow    = CreatePen(0, 1, RGB(160, 160, 170))
+                INT hPenHighlight = CreatePen(0, 1, RGB(255, 255, 255))
+                INT hPenBorder    = CreatePen(0, 1, RGB(160, 160, 160))
+                INT hOldPen       = SelectObject(hdcWin, hPenShadow)
+
+                MoveToEx(hdcWin, 10, 2, NULL)  : _LineTo(hdcWin, 10, 24)
+                MoveToEx(hdcWin, 455, 2, NULL) : _LineTo(hdcWin, 455, 24)
+
+                SelectObject(hdcWin, hPenHighlight)
+                MoveToEx(hdcWin, 11, 2, NULL)  : _LineTo(hdcWin, 11, 24)
+                MoveToEx(hdcWin, 456, 2, NULL) : _LineTo(hdcWin, 456, 24)
+
+                SelectObject(hdcWin, hPenBorder)
+                MoveToEx(hdcWin, 0, 0, NULL)   : _LineTo(hdcWin, posWIDTH, 0)
+                MoveToEx(hdcWin, 0, 26, NULL)  : _LineTo(hdcWin, posWIDTH, 26)
+
+                SelectObject(hdcWin, hPenHighlight)
+                MoveToEx(hdcWin, 0, 1, NULL)   : _LineTo(hdcWin, posWIDTH, 1)
+                MoveToEx(hdcWin, 0, 27, NULL)  : _LineTo(hdcWin, posWIDTH, 27)
+
+                SelectObject(hdcWin, hOldPen)
+                DeleteObject(hPenShadow)
+                DeleteObject(hPenHighlight)
+                DeleteObject(hPenBorder)
+
+                RELEASEHDC(WIN, hdcWin)
+            ENDIF
+
+            RETURN 1
+
+        Case @IDTIMER
+            Select @CODE
+                Case BALLOON_DISMISS_TIMER_ID
+                    STOPTIMER WIN, BALLOON_DISMISS_TIMER_ID
+                    HideBalloonToast()
+
+                Case FILE_MONITOR_TIMER_ID
+                    CheckFileStatus()
+
+                Case 3000
+                    STOPTIMER WIN, 3000
+                    DoOpen()
+            EndSelect
+
+        Case @IDSIZE
+            DoResize()
+
+        CASE WM_NOTIFY
+            IF @LPARAM <> 0 THEN
+                POINTER pNhdr
+                pNhdr = @LPARAM
+                SETTYPE pNhdr, Sci_NotifyHeader
+
+                IF (#pNhdr.idFrom = IDC_SCI_CREATE) OR (#pNhdr.hwndFrom = g_hSciCtrl) THEN
+                    POINTER pSCN
+                    pSCN = @LPARAM
+                    SETTYPE pSCN, SCNotification
+
+                    SELECT #pNhdr.code
+                        CASE SCN_MODIFIED
+                            IF g_IsLoading = FALSE THEN
+                                INT modType = #pSCN.modificationType
+                                Trace("SCN_MODIFIED hit! modificationType: " + HEX$(modType))
+
+                                IF (modType & (SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT)) <> 0 THEN
+                                    IF g_IsDirty = FALSE THEN
+                                        g_IsDirty = TRUE
+                                        UpdateTitleBar()
+                                    ENDIF
+                                    UpdateStatusBar()
+                                    UpdateGutter()
+                                ENDIF
+                            ENDIF
+                    ENDSELECT
+                ENDIF
+            ENDIF
+            RETURN 0
+
+        Case @IDMENUPICK
+
+            Select @MENUNUM
+
+                Case CMD_EXIT
+                   CancelAction = FALSE
+                   IsFileChanged()
+                   If CancelAction = TRUE THEN RETURN 0
+                   INIWrite()
+                   IF WIN.hwnd <> 0 THEN
+                     StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+                     StopTimer(WIN, BALLOON_DISMISS_TIMER_ID)
+                   ENDIF
+
+                   DoEndProgram()
+                   PostQuitMessage(0)
+                   RETURN 0
+
+               Case CMD_CLEAR_MRU
+                  ClearMRUHistory()
+                  ShowBalloonToast("Tpad Notification", "Recent files history cleared !")
+
+                Case CMD_NEW
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = TRUE THEN RETURN 0
+                    FileNew()
+
+                Case CMD_OPEN
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = TRUE THEN RETURN 0
+                    fName = ""
+                    DoOpen()
+
+                Case CMD_SAVEAS
+                    Save_As = 1
+                    DoSave()
+
+                Case CMD_PRINT
+                    DoPrint()
+                    SetFocusA(g_hSciCtrl)
+
+                Case CMD_UNDO
+                    DoUndo(WIN, g_hSciCtrl)
+
+                Case CMD_REDO
+                    DoRedo(WIN, g_hSciCtrl)
+
+                Case CMD_CUT
+                    SendMessageA(g_hSciCtrl, SCI_CUT, 0, 0):UpdateGutter()
+
+                Case CMD_COPY
+                    SendMessageA(g_hSciCtrl, SCI_COPY, 0, 0)
+
+                Case CMD_PASTE
+                    SendMessageA(g_hSciCtrl, SCI_PASTE, 0, 0):UpdateGutter()
+
+                Case CMD_SELECTALL
+                    SendMessageA(g_hSciCtrl, SCI_SELECTALL, 0, -1)
+
+                Case CMD_FIND
+                    Show_Find(WIN, g_hSciCtrl, FALSE):RETURN 0
+
+                Case CMD_REPLACE
+                    Show_Find(WIN, g_hSciCtrl, TRUE):RETURN 0
+
+                Case CMD_WORDWRAP
+                    ToggleWordWrap()
+
+                Case CMD_FONT
+                    OpenFontDialog()
+
+                Case CMD_ONTOP
+                    ToggleOnTop()
+
+                Case CMD_ABOUT
+                    DOMODAL About
+
+                Case 30 ' Theme Classic Light
+                    ApplyThemeStyles(0)
+                    INIWrite()
+
+                Case 31 ' Theme Modern Dark 
+                    ApplyThemeStyles(1)
+                    INIWrite()
+
+                CASE 32 ' Default (Plain Text)
+                    SetLexerByExtension("file.txt")
+                    SyncSyntaxMenuCheck(32)
+                CASE 33 ' Assembler
+                    SetLexerByExtension("file.asm")
+                    SyncSyntaxMenuCheck(33)
+                CASE 34 ' Basic
+                    SetLexerByExtension("file.iwb")
+                    SyncSyntaxMenuCheck(34)
+                CASE 35 ' C / C++
+                    SetLexerByExtension("file.cpp")
+                    SyncSyntaxMenuCheck(35)
+                CASE 36 ' Python
+                    SetLexerByExtension("file.py")
+                    SyncSyntaxMenuCheck(36)
+
+                Case 5000
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = FALSE Then
+                        fName = g_App.mru[0]
+                        If fName <> "Empty" THEN
+                            IF FileExists(fName) <> 1 THEN
+                                MESSAGEBOX(WIN, "The selected file no longer exists on disk:" + g_CRLF + fName + g_CRLF + g_CRLF + "It will be removed from the recent files list.", "File Not Found", MB_OK | MB_ICONWARNING)
+                                RemoveMRUItem(0)
+                                fName = ""
+                            ELSE
+                                STARTTIMER WIN, 10, 3000
+                            ENDIF
+                        EndIf
+                    EndIf
+
+                Case 5001
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = FALSE Then
+                        fName = g_App.mru[1]
+                        If fName <> "Empty" THEN
+                            IF FileExists(fName) <> 1 THEN
+                                MESSAGEBOX(WIN, "The selected file no longer exists on disk:" + g_CRLF + fName + g_CRLF + g_CRLF + "It will be removed from the recent files list.", "File Not Found", MB_OK | MB_ICONWARNING)
+                                RemoveMRUItem(1)
+                                fName = ""
+                            ELSE
+                                STARTTIMER WIN, 10, 3000
+                            ENDIF
+                        EndIf
+                    EndIf
+
+                Case 5002
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = FALSE Then
+                        fName = g_App.mru[2]
+                        If fName <> "Empty" THEN
+                            IF FileExists(fName) <> 1 THEN
+                                MESSAGEBOX(WIN, "The selected file no longer exists on disk:" + g_CRLF + fName + g_CRLF + g_CRLF + "It will be removed from the recent files list.", "File Not Found", MB_OK | MB_ICONWARNING)
+                                RemoveMRUItem(2)
+                                fName = ""
+                            ELSE
+                                STARTTIMER WIN, 10, 3000
+                            ENDIF
+                        EndIf
+                    EndIf
+
+                Case 5003
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = FALSE Then
+                        fName = g_App.mru[3]
+                        If fName <> "Empty" THEN
+                            IF FileExists(fName) <> 1 THEN
+                                MESSAGEBOX(WIN, "The selected file no longer exists on disk:" + g_CRLF + fName + g_CRLF + g_CRLF + "It will be removed from the recent files list.", "File Not Found", MB_OK | MB_ICONWARNING)
+                                RemoveMRUItem(3)
+                                fName = ""
+                            ELSE
+                                STARTTIMER WIN, 10, 3000
+                            ENDIF
+                        EndIf
+                    EndIf
+
+                Case 5004
+                    CancelAction = FALSE
+                    IsFileChanged()
+                    If CancelAction = FALSE Then
+                        fName = g_App.mru[4]
+                        If fName <> "Empty" THEN
+                            IF FileExists(fName) <> 1 THEN
+                                MESSAGEBOX(WIN, "The selected file no longer exists on disk:" + g_CRLF + fName + g_CRLF + g_CRLF + "It will be removed from the recent files list.", "File Not Found", MB_OK | MB_ICONWARNING)
+                                RemoveMRUItem(4)
+                                fName = ""
+                            ELSE
+                                STARTTIMER WIN, 10, 3000
+                            ENDIF
+                        EndIf
+                    EndIf
+            EndSelect
+
+        Case @IDCONTROL
+
+            Select @CONTROLID
+
+                Case CMD_NEW
+                    If @NotifyCode = 0
+                        CancelAction = FALSE
+                        IsFileChanged()
+                        If CancelAction = TRUE THEN RETURN 0
+                        FileNew()
+                    EndIf
+
+                Case CMD_OPEN
+                    If @NotifyCode = 0
+                        IsFileChanged()
+                        fName = ""
+                        DoOpen()
+                    EndIf
+
+                Case CMD_SAVEAS
+                    If @NotifyCode = 0
+                        If fName <> "" THEN Save_As = 0
+                        DoSave()
+                    EndIf
+
+                Case CMD_CUT
+                    If @NotifyCode = 0 THEN SendMessageA(g_hSciCtrl, SCI_CUT, 0, 0):UpdateGutter()
+
+                Case CMD_COPY
+                    If @NotifyCode = 0 THEN SendMessageA(g_hSciCtrl, SCI_COPY, 0, 0)
+
+                Case CMD_PASTE
+                    If @NotifyCode = 0 THEN SendMessageA(g_hSciCtrl, SCI_PASTE, 0, 0):UpdateGutter()
+
+                Case CMD_UNDO
+                    If @NotifyCode = 0 THEN DoUndo(WIN, g_hSciCtrl)
+
+                Case CMD_REDO
+                    If @NotifyCode = 0 THEN DoRedo(WIN, g_hSciCtrl)
+
+                Case CMD_PRINT
+                    If @NotifyCode = 0
+                        DoPrint()
+                        SetFocusA(g_hSciCtrl)
+                    EndIf
+
+                Case CMD_FIND
+                    If @NotifyCode = 0 THEN Show_Find(WIN, g_hSciCtrl, FALSE)
+
+                Case CMD_REPLACE
+                    If @NotifyCode = 0 THEN Show_Find(WIN, g_hSciCtrl, TRUE)
+
+                Case CMD_PROPERTIES
+                    If @NotifyCode = 0 Then
+                        If fName = "" OR fName = "Empty" Then
+                            'MESSAGEBOX(WIN, "No file is currently open.", "Properties", @MB_ICONINFORMATION)
+                            ShowBalloonToast("Properties", "No file is currently open.")
+                            SetFocusA(g_hSciCtrl)
+                        Else
+                            OleInitialize(0)
+
+                            SHELLEXECUTEINFO sei
+                            RtlZeroMemory(&sei, LEN(sei))
+
+                            STRING szVerb = "properties"
+                            STRING szFile = fName
+
+                            sei.cbSize = LEN(sei)
+                            sei.fMask = 0x0000000C
+                            sei.hwnd = WIN.hwnd
+                            sei.lpVerb = &szVerb
+                            sei.lpFile = &szFile
+                            sei.lpParameters = NULL
+                            sei.nShow = SW_SHOW
+
+                            If ShellExecuteExA(&sei) = FALSE Then
+                                'MESSAGEBOX(WIN, "Unable to display file properties.", "Properties Error", @MB_ICONSTOP)
+                                ShowBalloonToast("Properties Error", "Unable to display file properties.")
+                            EndIf
+
+                            OleUninitialize()
+                            SetFocusA(g_hSciCtrl)
+                        EndIf
+                    EndIf
+
+                Case CMD_WORDWRAP
+                    If @NotifyCode = 0 THEN ToggleWordWrap()
+
+                Case CMD_FONT
+                    If @NotifyCode = 0 THEN OpenFontDialog()
+
+                Case CMD_ONTOP
+                    If @NotifyCode = 0 THEN ToggleOnTop()
+
+                Case CMD_ABOUT
+                    If @NotifyCode = 0 THEN DOMODAL About
+
+                Case IDC_SCI_CREATE
+                    IF g_IsLoading = FALSE THEN
+                        UpdateStatusBar()
+                    ENDIF
+
+                Case 101 ' GOTO LINE BOX
+                    If @NOTIFYCODE = @ENSETFOCUS Then
+                        If GETCONTROLTEXT(WIN, 101) = "Goto Line" THEN SETCONTROLTEXT WIN, 101, ""
+                    EndIf
+
+                Case 102
+                    If @NOTIFYCODE = 0 THEN Edit_Scroll_2Line()
+
+                Case 103
+                    If @NOTIFYCODE = 0 THEN Edit_Scroll_2top()
+
+                Case 104
+                    If @NOTIFYCODE = 0 THEN Edit_Scroll_2bottom()
+
+                Case 2000
+                    Select @NOTIFYCODE
+                        Case TBN_DROPDOWN
+                            INT mc = 0
+                            UINT hMruMenu = 0
+
+                            For mc = 0 TO 4
+                                ' If string is NOT empty AND NOT "Empty", it's a valid MRU file entry
+                                IF (g_App.mru[mc] = "") OR (g_App.mru[mc] = "Empty") THEN
+                                    g_App.mruFlags[mc] = @MENUDISABLE
+                                Else
+                                    g_App.mruFlags[mc] = 0
+                                EndIf
+                            Next mc
+
+                            hMruMenu = CreatePopupMenu()
+
+                            If hMruMenu <> 0 Then
+                                AppendMenuA(hMruMenu, g_App.mruFlags[0], 5000, g_App.mru[0])
+                                AppendMenuA(hMruMenu, g_App.mruFlags[1], 5001, g_App.mru[1])
+                                AppendMenuA(hMruMenu, g_App.mruFlags[2], 5002, g_App.mru[2])
+                                AppendMenuA(hMruMenu, g_App.mruFlags[3], 5003, g_App.mru[3])
+                                AppendMenuA(hMruMenu, g_App.mruFlags[4], 5004, g_App.mru[4])
+
+                                ' Add separator and Clear action using standard IF check
+                                AppendMenuA(hMruMenu, MF_SEPARATOR, 0, NULL)
+                
+                                IF hasMruItems = TRUE THEN
+                                    clearFlags = 0
+                                ELSE
+                                    clearFlags = @MENUDISABLE
+                                ENDIF
+                
+                                AppendMenuA(hMruMenu, 0, CMD_CLEAR_MRU, "Clear Recent Files")
+                                ' Attach the converted 3small icon bitmap to active MRU items + Clear
+                                IF g_hMruIconBmp <> 0 THEN
+                                  For mc = 0 TO 4
+                                    IF g_App.mruFlags[mc] = 0 THEN
+                                      SetMenuItemBitmaps(hMruMenu, 5000 + mc, MF_BYCOMMAND, g_hMruIconBmp, NULL)
+                                    ENDIF
+                                  Next mc
+                                ENDIF
+
+                                ' Attach the converted 4bin icon bitmap to Clear MRU
+                                IF g_hMruBinBmp <> 0 THEN
+                                  SetMenuItemBitmaps(hMruMenu, CMD_CLEAR_MRU, MF_BYCOMMAND, g_hMruBinBmp, NULL)
+                                ENDIF
+                                g_WndMenu.SkinSubmenus(hMruMenu)
+
+                                ' Query the bounding box of the Open toolbar button (CMD_OPEN = ID 2)
+                                WINRECT rcBtn
+                                SendMessageA(hToolBar, TB_GETRECT, CMD_OPEN, &rcBtn)
+
+                                ' Convert button coordinates from toolbar client space to screen space
+                                POINT pt
+                                pt.x = rcBtn.left
+                                pt.y = rcBtn.bottom
+                                ClientToScreen(hToolBar, &pt)
+
+                                TrackPopupMenu(hMruMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, WIN.hwnd, NULL)
+                                DestroyMenu(hMruMenu)
+                            EndIf
+
+                    EndSelect
+            EndSelect
+    EndSelect
+
+Return 0
+EndSub
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': ConfigureScintillaDefaults - Unlocks Read-Only & Enables Input
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB ConfigureScintillaDefaults()
+    IF g_hSciCtrl = 0 THEN RETURN
+
+    ' Initialize Balloon Tooltip Overlay Window attached to main window
+    IF g_hwndToolTip = 0 AND WIN.hwnd <> 0 THEN
+        HINSTANCE hInst = GetModuleHandleA(0)
+        g_hwndToolTip = CreateWindowExA(0, "tooltips_class32", "", _
+            0x01 | 0x40, _
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, _
+            WIN.hwnd, 0, hInst, 0)
+
+        IF g_hwndToolTip <> 0 THEN
+            SetWindowPos(g_hwndToolTip, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+            SendMessageA(g_hwndToolTip, TTM_SETMAXTIPWIDTH, 0, 400)
+        ENDIF
+    ENDIF
+
+    SendMessageA(g_hSciCtrl, SCI_SETREADONLY, FALSE, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETCODEPAGE, SC_CP_UTF8, 0)
+
+    INT bgColor = RGB(253, 246, 227)
+    SendMessageA(g_hSciCtrl, SCI_STYLESETBACK, STYLE_DEFAULT, bgColor)
+
+    ISTRING fontBuf[64]
+    IF g_App.fontName <> "" THEN
+        fontBuf = g_App.fontName
+    ELSE
+        fontBuf = "Consolas"
+    ENDIF
+    SendMessageA(g_hSciCtrl, SCI_STYLESETFONT, STYLE_DEFAULT, &fontBuf)
+
+    INT fSize = g_App.fontSize
+    IF fSize <= 0 THEN fSize = 10
+    SendMessageA(g_hSciCtrl, SCI_STYLESETSIZE, STYLE_DEFAULT, fSize)
+
+    INT isBold = FALSE
+    IF g_App.fontWeight >= 700 OR (g_App.fontFlags & 1) THEN isBold = TRUE
+    SendMessageA(g_hSciCtrl, SCI_STYLESETBOLD, STYLE_DEFAULT, isBold)
+
+    INT isItalic = FALSE
+    IF (g_App.fontFlags & 2) <> 0 THEN isItalic = TRUE
+    SendMessageA(g_hSciCtrl, SCI_STYLESETITALIC, STYLE_DEFAULT, isItalic)
+
+    SendMessageA(g_hSciCtrl, SCI_STYLECLEARALL, 0, 0)
+
+    SendMessageA(g_hSciCtrl, SCI_SETMARGINWIDTHN, 0, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETUNDOCOLLECTION, TRUE, 0)
+    
+    SendMessageA(g_hSciCtrl, SCI_SETMODEVENTMASK, SC_MOD_INSERTTEXT | SC_MOD_DELETETEXT, 0)
+
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("C") + (2 << 16), 0)
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("X") + (2 << 16), 0)
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("V") + (2 << 16), 0)
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("Z") + (2 << 16), 0)
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("Y") + (2 << 16), 0)
+    SendMessageA(g_hSciCtrl, SCI_CLEARCMDKEY, ASC("A") + (2 << 16), 0)
+ENDSUB
+
+SUB ApplyThemeStyles(INT themeID)
+    INT hSci = g_hSciCtrl
+    IF (hSci = 0) THEN RETURN 
+
+    g_App.themeID = themeID
+
+    IF themeID = 1 THEN
+        SyncThemeMenuCheck(31)
+    ELSE
+        SyncThemeMenuCheck(30)
+    ENDIF
+
+    IF (g_hEditorFont <> 0)
+        DeleteObject(g_hEditorFont)
+        g_hEditorFont = 0
+    ENDIF
+
+    STRING fontName$ = g_App.fontName
+    IF fontName$ = "" THEN fontName$ = "Consolas"
+    
+    INT fontSize = g_App.fontSize
+    IF fontSize <= 0 THEN fontSize = 10
+
+    g_hEditorFont = CreateFontA( _
+        -MulDiv(fontSize, GetDeviceCaps(GetDC(WIN.hwnd), 90), 72), 0, 0, 0, _
+        g_App.fontWeight, (g_App.fontFlags & 2), (g_App.fontFlags & 4), 0, _
+        0, 0, 0, 0, 0, fontName$ _
+    )
+
+    INT bgCol, fgCol, selBgCol, curLineBg, commentCol, kwdCol, kwd2Col, strCol, numCol, opCol, caretColor
+
+    SELECT themeID
+        CASE 1 ' Dark / Modern
+            bgCol      = 0x1C1C1C           ' Dark Gray Background (#1C1C1C)
+            fgCol      = 0xF0FAFF           ' Off-White Main Text (#F0FAFF)
+            selBgCol   = 0x8080             ' Selection Highlight
+            curLineBg  = 0x262A2B           ' Current Line Background
+            commentCol = 0x8CE6F0           ' Light Cyan Comments
+            kwdCol     = 0x00D7FF           ' GOLD -> Primary Keywords (sub, if, int, control, etc.)
+            kwd2Col    = 0xFFD700           ' CYAN -> Preprocessor ($main, $include)
+            strCol     = 0x8FBC8F           ' Sea Green Strings
+            numCol     = 0x4763FF           ' Red-Orange Numbers
+            opCol      = 0xD0E040           ' Muted Turquoise Operators (+, -, =, (, ))
+            caretColor = 0x258FF5           ' Orange Caret
+
+        DEFAULT ' Classic Light
+            bgCol      = 0xE7F6FD  
+            fgCol      = 0x362B00  
+            selBgCol   = 0x8CE6F0  
+            curLineBg  = 0xDAEFEF  
+            commentCol = 0x008000  
+            kwdCol     = 0x0064B4
+            kwd2Col    = 0xEE687B
+            strCol     = 0x8B008B  
+            numCol     = 0x0045FF  
+            opCol      = 0xCD5A6A  
+            caretColor = 0x3C14DC
+    ENDSELECT
+
+    ISTRING fBuf[64]
+    fBuf = fontName$
+    SendMessageA(hSci, SCI_STYLESETFONT, STYLE_DEFAULT, &fBuf)
+    SendMessageA(hSci, SCI_STYLESETSIZE, STYLE_DEFAULT, fontSize)
+    SendMessageA(hSci, SCI_STYLESETFORE, STYLE_DEFAULT, fgCol)
+    SendMessageA(hSci, SCI_STYLESETBACK, STYLE_DEFAULT, bgCol)
+
+    SendMessageA(hSci, SCI_STYLECLEARALL, 0, 0)
+
+    SendMessageA(hSci, SCI_SETSELBACK, TRUE, selBgCol)
+    SendMessageA(hSci, SCI_SETSELALPHA, 80, 0)
+    SendMessageA(hSci, SCI_SETCARETFORE, caretColor, 0)
+    SendMessageA(hSci, SCI_SETCARETLINEBACK, curLineBg, 0)
+    SendMessageA(hSci, SCI_SETCARETLINEVISIBLE, TRUE, 0)
+
+    ' Copy default foreground/background to ALL styles (0-255)
+    SendMessageA(hSci, SCI_STYLECLEARALL, 0, 0)
+
+    ' ========================================================================
+    ' IF PLAIN TEXT / DEFAULT SYNTAX IS ACTIVE, DO NOT APPLY SYNTAX COLORS
+    ' ========================================================================
+    IF g_activeLexer = SCLEX_NULL THEN
+        SendMessageA(hSci, SCI_SETCARETWIDTH, 2, 0)
+        SendMessageA(hSci, SCI_SETCARETSTYLE, CARETSTYLE_LINE, 0)
+        SendMessageA(hSci, SCI_SETVIEWWS, SCWS_VISIBLEALWAYS, 0)
+        SendMessageA(hSci, SCI_SETWHITESPACESIZE, 2, 0)
+        SendMessageA(hSci, SCI_SETEDGEMODE, SC_EDGE_LINE, 0)
+        SendMessageA(hSci, SCI_SETEDGECOLUMN, 80, 0)
+        InvalidateRect(hSci, NULL, TRUE)
+        SetFocusA(hSci)
+        RETURN
+    ENDIF
+
+    ' ========================================================================
+    ' C / C++ Lexer Styles (Direct Scintilla Style IDs)
+    ' ========================================================================
+    SendMessageA(hSci, SCI_STYLESETFORE, 0, fgCol)        ' Default
+    SendMessageA(hSci, SCI_STYLESETBACK, 0, bgCol)
+    SendMessageA(hSci, SCI_STYLESETFORE, 1, commentCol)   ' Comment block
+    SendMessageA(hSci, SCI_STYLESETFORE, 2, commentCol)   ' Comment line
+    SendMessageA(hSci, SCI_STYLESETITALIC, 2, TRUE)
+    SendMessageA(hSci, SCI_STYLESETFORE, 4, numCol)       ' Numbers
+    SendMessageA(hSci, SCI_STYLESETFORE, 5, kwdCol)       ' Primary Keywords -> GOLD
+    SendMessageA(hSci, SCI_STYLESETBOLD, 5, TRUE)
+    SendMessageA(hSci, SCI_STYLESETFORE, 6, strCol)       ' Strings
+    SendMessageA(hSci, SCI_STYLESETFORE, 9, kwd2Col)      ' Preprocessor -> CYAN
+    SendMessageA(hSci, SCI_STYLESETFORE, 10, opCol)       ' Operators
+
+    ' ========================================================================
+    ' BASIC / IWBasic / FreeBasic Lexer Styles (Direct Scintilla Style IDs)
+    ' ========================================================================
+    SendMessageA(hSci, SCI_STYLESETFORE, 0, fgCol)        ' Style 0: Default Text
+    SendMessageA(hSci, SCI_STYLESETBACK, 0, bgCol)
+    SendMessageA(hSci, SCI_STYLESETFORE, 1, commentCol)   ' Style 1: Comments
+    SendMessageA(hSci, SCI_STYLESETITALIC, 1, TRUE)
+    SendMessageA(hSci, SCI_STYLESETFORE, 2, numCol)       ' Style 2: Numbers
+    SendMessageA(hSci, SCI_STYLESETFORE, 3, kwdCol)       ' Style 3: Primary Keywords (Set 0) -> GOLD
+    SendMessageA(hSci, SCI_STYLESETBOLD, 3, TRUE)
+    SendMessageA(hSci, SCI_STYLESETFORE, 4, strCol)       ' Style 4: Strings
+    SendMessageA(hSci, SCI_STYLESETFORE, 5, kwd2Col)      ' Style 5: Preprocessor -> CYAN
+    SendMessageA(hSci, SCI_STYLESETFORE, 6, opCol)       ' Style 6: Operators
+    SendMessageA(hSci, SCI_STYLESETFORE, 7, fgCol)       ' Style 7: Identifiers
+    SendMessageA(hSci, SCI_STYLESETFORE, 10, kwd2Col)     ' Style 10: Secondary Keywords (Set 1) -> CYAN
+    SendMessageA(hSci, SCI_STYLESETBOLD, 10, TRUE)
+
+    ' Editor View Controls
+    SendMessageA(hSci, SCI_SETCARETWIDTH, 2, 0)
+    SendMessageA(hSci, SCI_SETCARETSTYLE, CARETSTYLE_LINE, 0)
+    SendMessageA(hSci, SCI_SETVIEWWS, SCWS_VISIBLEALWAYS, 0)
+    SendMessageA(hSci, SCI_SETWHITESPACESIZE, 2, 0)
+    SendMessageA(hSci, SCI_SETEDGEMODE, SC_EDGE_LINE, 0)
+    SendMessageA(hSci, SCI_SETEDGECOLUMN, 80, 0)
+
+    SendMessageA(hSci, SCI_COLOURISE, 0, -1)
+    InvalidateRect(hSci, NULL, TRUE)
+    SetFocusA(hSci)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Memory-Mapped File Loader with 10MB Guard & Encoding Engine
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB LoadMemoryMappedFile(STRING filePath$), INT
+    IF LEN(filePath$) = 0 THEN RETURN FALSE
+    
+    HANDLE hFile = CreateFileA(filePath$, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+    IF hFile = INVALID_HANDLE_VALUE THEN RETURN FALSE
+
+    DWORD fileSize = GetFileSize(hFile, NULL)
+    IF fileSize > 10485760 THEN
+        CloseHandle(hFile)
+        RETURN FALSE
+    ENDIF
+
+    IF fileSize = 0 THEN
+        CloseHandle(hFile)
+        SendMessageA(g_hSciCtrl, SCI_SETTEXT, 0, &"")
+        g_App.isANSI = 0
+        UpdateStatusBar()
+        RETURN TRUE
+    ENDIF
+
+    HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL)
+    POINTER pMem = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, fileSize)
+
+    INT skipBytes = 0
+    INT isUtf8 = FALSE
+    IF fileSize >= 3 THEN
+        IF (#<BYTE>(pMem + 0) = 0xEF) AND (#<BYTE>(pMem + 1) = 0xBB) AND (#<BYTE>(pMem + 2) = 0xBF) THEN
+            skipBytes = 3
+            isUtf8 = TRUE
+        ENDIF
+    ENDIF
+
+    IF isUtf8 = FALSE THEN
+        isUtf8 = IsUTF8(pMem, fileSize)
+    ENDIF
+
+    IF isUtf8 THEN
+        g_App.isANSI = 0
+    ELSE
+        g_App.isANSI = 1
+    ENDIF
+
+    POINTER pFinalBuf = NULL
+    DWORD payloadLen = fileSize - skipBytes
+
+    IF isUtf8 THEN
+        pFinalBuf = SafeAllocHeap(payloadLen + 2)
+        RtlMoveMemory(pFinalBuf, pMem + skipBytes, payloadLen)
+        #<BYTE>(pFinalBuf + payloadLen) = 0
+    ELSE
+        INT wLen = MultiByteToWideChar(0, 0, pMem, fileSize, NULL, 0)
+        POINTER pWide = SafeAllocHeap((wLen + 1) * 2)
+        MultiByteToWideChar(0, 0, pMem, fileSize, pWide, wLen)
+
+        INT uLen = WideCharToMultiByte(65001, 0, pWide, wLen, NULL, 0, NULL, NULL)
+        pFinalBuf = SafeAllocHeap(uLen + 2)
+        WideCharToMultiByte(65001, 0, pWide, wLen, pFinalBuf, uLen, NULL, NULL)
+        #<BYTE>(pFinalBuf + uLen) = 0
+        
+        SafeFreeHeap(pWide)
+    ENDIF
+
+    IF pFinalBuf <> NULL THEN
+        SendMessageA(g_hSciCtrl, SCI_SETTEXT, 0, pFinalBuf)
+        SafeFreeHeap(pFinalBuf)
+    ENDIF
+
+    UnmapViewOfFile(pMem)
+    CloseHandle(hMap)
+    CloseHandle(hFile)
+
+    UpdateStatusBar()
+    RETURN TRUE
+ENDSUB
+
+SUB IsUTF8(POINTER pMem, DWORD fileSize), INT
+    IF pMem = NULL OR fileSize = 0 THEN RETURN FALSE
+    
+    DWORD i = 0
+    BYTE b = 0
+    INT nBytes = 0
+    INT hasNonASCII = FALSE
+
+    WHILE i < fileSize
+        b = #<BYTE>(pMem + i)
+        
+        IF b >= 128 THEN hasNonASCII = TRUE
+
+        IF nBytes = 0 THEN
+            IF b >= 0x80 THEN
+                IF (b & 0xE0) = 0xC0 THEN
+                    nBytes = 1
+                ELSEIF (b & 0xF0) = 0xE0 THEN
+                    nBytes = 2
+                ELSEIF (b & 0xF8) = 0xF0 THEN
+                    nBytes = 3
+                ELSE
+                    RETURN FALSE
+                ENDIF
+            ENDIF
+        ELSE
+            IF (b & 0xC0) <> 0x80 THEN RETURN FALSE
+            nBytes--
+        ENDIF
+        i++
+    WEND
+
+    IF nBytes <> 0 THEN RETURN FALSE
+    RETURN hasNonASCII
+ENDSUB
+
+SUB GetReadableFileSize(DWORD fileSize, POINTER pOutBuf)
+    IF pOutBuf = NULL THEN RETURN
+
+    DWORD whole = 0
+    DWORD frac = 0
+
+    IF fileSize < 1024 THEN
+        wsprintfA(pOutBuf, "%u B", fileSize)
+        RETURN
+    ENDIF
+
+    IF fileSize < 1048576 THEN
+        whole = fileSize / 1024
+        frac  = ((fileSize % 1024) * 10) / 1024
+        wsprintfA(pOutBuf, "%u.%u KB", whole, frac)
+        RETURN
+    ENDIF
+
+    whole = fileSize / 1048576
+    
+    DOUBLE tempFrac = (DOUBLE(fileSize % 1048576) * 100.0) / 1048576.0
+    frac = INT(tempFrac)
+
+    IF frac < 10 THEN
+        wsprintfA(pOutBuf, "%u.0%u MB", whole, frac)
+    ELSE
+        wsprintfA(pOutBuf, "%u.%u MB", whole, frac)
+    ENDIF
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Native Custom Find & Replace Subroutines
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB Show_Find(WINDOW win, INT ctrlID, INT findreplace)
+    IF search_dlg.hwnd <> 0 
+        IF IsWindow(search_dlg.hwnd) THEN RETURN
+    ENDIF
+    search_win = win
+    search_ctl = ctrlID
+    g_IsReplaceDialog = findreplace
+
+    SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_FIND, 0)
+    SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_REPLACE, 0)
+
+    ENABLEMENUITEM WIN, CMD_FIND, 0
+    ENABLEMENUITEM WIN, CMD_REPLACE, 0
+
+    If findreplace = 0 Then
+        search_dlg = dlg_find
+    Else
+        search_dlg = dlg_findreplace
+    EndIf
+
+    SHOWDIALOG search_dlg, search_win
+    RETURN
+EndSub
+
+SUB Load_FindReplace()
+    CREATEDIALOG dlg_find, 100, 100, 345, 90, @NOCAPTION, WIN, "Find", &routineFindReplace
+    CONTROL dlg_find, @STATIC, "Search for", 10, 18, 80, 20, 0, lblSearch
+    CONTROL dlg_find, @EDIT, "", 90, 15, 150, 20, @TABSTOP, ctlSearchtext
+    CONTROL dlg_find, @CHECKBOX, "&Match Case", 90, 40, 100, 20, 0x50018003, ctlMatchCase
+    CONTROL dlg_find, @CHECKBOX, "&Match Whole Word", 90, 62, 150, 20, 0x50018003, ctlMatchWholeWord
+    CONTROL dlg_find, @RGNBUTTON, "&Find", 250, 15, 80, 24, 0x50000000, ctlFind
+    CONTROL dlg_find, @RGNBUTTON, "&Close", 250, 48, 80, 24, 0x50000000, ctlClose
+
+    CREATEDIALOG dlg_findreplace, 100, 100, 345, 130, @NOCAPTION, WIN, "Find/Replace", &routineFindReplace
+    CONTROL dlg_findreplace, @STATIC, "Search for", 10, 18, 80, 20, 0, lblSearch
+    CONTROL dlg_findreplace, @EDIT, "", 100, 15, 150, 20, @TABSTOP, ctlSearchtext
+    CONTROL dlg_findreplace, @STATIC, "Replace with", 10, 43, 85, 20, 0, lblReplace
+    CONTROL dlg_findreplace, @EDIT, "", 100, 40, 150, 20, @TABSTOP, ctlReplacetext
+    CONTROL dlg_findreplace, @CHECKBOX, "&Match Case", 100, 65, 100, 20, 0x50018003, ctlMatchCase
+    CONTROL dlg_findreplace, @CHECKBOX, "&Match Whole Word", 100, 87, 150, 20, 0x50018003, ctlMatchWholeWord
+    CONTROL dlg_findreplace, @RGNBUTTON, "&Find Next", 255, 10, 80, 24, 0x50000000, ctlFind
+    CONTROL dlg_findreplace, @RGNBUTTON, "&Replace", 255, 40, 80, 24, 0x50000000, ctlReplaceBtn
+    CONTROL dlg_findreplace, @RGNBUTTON, "Repl. &All", 255, 70, 85, 24, 0x50000000, ctlReplaceAll
+    CONTROL dlg_findreplace, @RGNBUTTON, "&Close", 255, 100, 80, 24, 0x50000000, ctlClose
+    RETURN
+EndSub
+
+SUB routineFindReplace(), INT
+    Select @MESSAGE
+        Case @IDINITDIALOG
+            g_FindOrig = GetWindowLongA(search_dlg.hwnd, GWL_WNDPROC)
+            SetWindowLongA(search_dlg.hwnd, GWL_WNDPROC, &ColorFindSubClass)
+
+            ModifyExStyle(search_dlg, WS_BORDER, @EXCLIENTEDGE, ctlSearchtext)
+            IF g_IsReplaceDialog = 1
+                ModifyExStyle(search_dlg, WS_BORDER, @EXCLIENTEDGE, ctlReplacetext)
+            ENDIF
+
+            ReDrawFrame(search_dlg, ctlSearchtext)
+            IF g_IsReplaceDialog = 1
+                ReDrawFrame(search_dlg, ctlReplacetext)
+            ENDIF
+
+            hBmp1 = LoadImage("brushed_btn_XL", @IMGBITMAP)
+
+            INT hrgn1 = RGNFROMBITMAP("brgn_XL")
+            SETBUTTONRGN search_dlg, ctlFind, hrgn1
+            SETHTCOLOR search_dlg, ctlFind, RGB(234, 230, 234)
+            SETBUTTONBITMAPS search_dlg, ctlFind, hBmp1, 0, 0
+            SETBUTTONBORDER search_dlg, ctlFind, 1
+
+            INT hrgn2 = RGNFROMBITMAP("brgn_XL")
+            SETBUTTONRGN search_dlg, ctlClose, hrgn2
+            SETHTCOLOR search_dlg, ctlClose, RGB(234, 230, 234)
+            SETBUTTONBITMAPS search_dlg, ctlClose, hBmp1, 0, 0
+            SETBUTTONBORDER search_dlg, ctlClose, 1
+
+            If g_IsReplaceDialog = 1 Then
+                INT hrgn3 = RGNFROMBITMAP("brgn_XL")
+                SETBUTTONRGN search_dlg, ctlReplaceBtn, hrgn3
+                SETHTCOLOR search_dlg, ctlReplaceBtn, RGB(234, 230, 234)
+                SETBUTTONBITMAPS search_dlg, ctlReplaceBtn, hBmp1, 0, 0
+                SETBUTTONBORDER search_dlg, ctlReplaceBtn, 1
+
+                INT hrgn4 = RGNFROMBITMAP("brgn_XL")
+                SETBUTTONRGN search_dlg, ctlReplaceAll, hrgn4
+                SETHTCOLOR search_dlg, ctlReplaceAll, RGB(234, 230, 234)
+                SETBUTTONBITMAPS search_dlg, ctlReplaceAll, hBmp1, 0, 0
+                SETBUTTONBORDER search_dlg, ctlReplaceAll, 1
+            EndIf
+
+            InjectUIFont(search_dlg.hwnd)
+            CENTERWINDOW search_dlg
+            setfirststart(search_win, g_hSciCtrl)
+            SETSTATE search_dlg, ctlMatchCase, match_case
+            SETSTATE search_dlg, ctlMatchWholeWord, match_word
+            SETCONTROLTEXT search_dlg, ctlSearchtext, Searchtext
+            If g_IsReplaceDialog = 1 THEN SETCONTROLTEXT search_dlg, ctlReplacetext, gReplaceText
+
+        Case @IDERASEBACKGROUND
+            RETURN 0
+
+        Case @IDLBUTTONDN
+            DragWindow(search_dlg)
+
+        Case @IDCLOSEWINDOW
+            SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_FIND, 1)
+            SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_REPLACE, 1)
+
+            ENABLEMENUITEM WIN, CMD_FIND, 1
+            ENABLEMENUITEM WIN, CMD_REPLACE, 1
+
+            CLOSEDIALOG search_dlg
+            SETFOCUS search_win, g_hSciCtrl
+
+        Case @IDCONTROL
+            Select @CONTROLID
+                Case ctlClose
+                    SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_FIND, 1)
+                    SendMessage(hToolBar, TB_ENABLEBUTTON, CMD_REPLACE, 1)
+
+                    ENABLEMENUITEM WIN, CMD_FIND, 1
+                    ENABLEMENUITEM WIN, CMD_REPLACE, 1
+
+                    CLOSEDIALOG search_dlg
+                    SETFOCUS search_win, g_hSciCtrl
+
+                Case ctlSearchtext
+                    If @NOTIFYCODE = @ENCHANGE
+                        setfirststart(search_win, g_hSciCtrl)
+                        Searchtext = GETCONTROLTEXT(search_dlg, ctlSearchtext)
+                        InvalidateRect(GetDlgItem(search_dlg.hwnd, ctlSearchtext), NULL, TRUE)
+                    EndIf
+
+                Case ctlReplacetext
+                    If @NOTIFYCODE = @ENCHANGE
+                        gReplaceText = GETCONTROLTEXT(search_dlg, ctlReplacetext)
+                        InvalidateRect(GetDlgItem(search_dlg.hwnd, ctlReplacetext), NULL, TRUE)
+                    EndIf
+
+                Case ctlFind
+                    doFind(search_win, g_hSciCtrl, Searchtext, 1 - match_case)
+
+                Case ctlReplaceBtn
+                    doReplace(search_win, g_hSciCtrl, Searchtext, gReplaceText, 1 - match_case)
+
+                Case ctlReplaceAll
+                    doReplaceAll(search_win, g_hSciCtrl, Searchtext, gReplaceText, 1 - match_case)
+
+                Case ctlMatchCase
+                    match_case = GETSTATE(search_dlg, ctlMatchCase)
+                    setfirststart(search_win, g_hSciCtrl)
+
+                Case ctlMatchWholeWord
+                    match_word = GETSTATE(search_dlg, ctlMatchWholeWord)
+                    setfirststart(search_win, g_hSciCtrl)
+            EndSelect
+
+    EndSelect
+    Return 0
+EndSub
+
+SUB GetUTF8ByteLength(STRING textVal$), INT
+    IF textVal$ = "" THEN RETURN 0
+    INT wLen = MultiByteToWideChar(CP_ACP, 0, textVal$, -1, NULL, 0)
+    IF wLen <= 1 THEN RETURN 0
+    POINTER pWide = SafeAllocHeap(wLen * 2)
+    IF pWide = NULL THEN RETURN 0
+    MultiByteToWideChar(CP_ACP, 0, textVal$, -1, pWide, wLen)
+    INT byteLen = WideCharToMultiByte(CP_UTF8, 0, pWide, wLen - 1, NULL, 0, NULL, NULL)
+    SafeFreeHeap(pWide)
+    RETURN byteLen
+ENDSUB
+
+SUB setfirststart(WINDOW w, INT ctrlID)
+    IF g_hSciCtrl = 0 THEN RETURN
+    startattop = FALSE
+    found = FALSE
+    RETURN
+ENDSUB
+
+SUB doFind(WINDOW w, INT ctrlID, STRING textToFind, INT ignoreCase)
+    IF textToFind = "" THEN
+        'MESSAGEBOX search_dlg, "Cannot search for an empty string.", "Find Text"
+        ShowBalloonToast("Find Text", "Cannot search for an empty string.")
+        RETURN
+    ENDIF
+
+    UINT hControl = g_hSciCtrl
+    IF hControl = 0 THEN RETURN
+
+    INT docLen = SendMessageA(hControl, SCI_GETLENGTH, 0, 0)
+    IF docLen <= 0 THEN
+        'MESSAGEBOX search_dlg, "Cannot find the text '" + textToFind + "'", "Find Text"
+        ShowBalloonToast("Find Text", "Cannot find the text '" + textToFind)
+        RETURN
+    ENDIF
+
+    INT searchFlags = 0
+    IF ignoreCase = FALSE THEN searchFlags = searchFlags | SCFIND_MATCHCASE
+    IF match_word <> 0    THEN searchFlags = searchFlags | SCFIND_WHOLEWORD
+
+    SendMessageA(hControl, SCI_SETSEARCHFLAGS, searchFlags, 0)
+
+    INT searchStart = SendMessageA(hControl, SCI_GETSELECTIONEND, 0, 0)
+    
+    SendMessageA(hControl, SCI_SETTARGETSTART, searchStart, 0)
+    SendMessageA(hControl, SCI_SETTARGETEND, docLen, 0)
+
+    INT byteLen = GetUTF8ByteLength(textToFind)
+    IF byteLen <= 0 THEN RETURN
+
+    INT pos = SendMessageA(hControl, SCI_SEARCHINTARGET, byteLen, &textToFind)
+
+    IF pos = -1 AND startattop = FALSE THEN
+        startattop = TRUE
+        SendMessageA(hControl, SCI_SETTARGETSTART, 0, 0)
+        SendMessageA(hControl, SCI_SETTARGETEND, docLen, 0)
+        pos = SendMessageA(hControl, SCI_SEARCHINTARGET, byteLen, &textToFind)
+    ENDIF
+
+    IF pos <> -1 THEN
+        INT matchStart = SendMessageA(hControl, SCI_GETTARGETSTART, 0, 0)
+        INT matchEnd   = SendMessageA(hControl, SCI_GETTARGETEND, 0, 0)
+
+        SendMessageA(hControl, SCI_SETSEL, matchStart, matchEnd)
+        SendMessageA(hControl, SCI_SETTARGETSTART, matchEnd, 0)
+        SendMessageA(hControl, SCI_SETTARGETEND, docLen, 0)
+        SendMessageA(hControl, SCI_SCROLLCARET, 0, 0)
+
+        SetFocus search_dlg, ctlFind
+        found = TRUE
+    ELSE
+        'MESSAGEBOX search_dlg, "Cannot find the text '" + textToFind + "'", "Find Text"
+        ShowBalloonToast("Find Text", "Cannot find the text '" + textToFind)
+        setfirststart(w, g_hSciCtrl)
+    ENDIF
+
+    RETURN
+ENDSUB
+
+SUB doReplace(WINDOW w, INT ctrlID, STRING textToFind, STRING textToRep, INT ignoreCase)
+    UINT hControl = g_hSciCtrl
+    IF hControl = 0 THEN RETURN
+
+    INT start_pos = SendMessageA(hControl, SCI_GETCURRENTPOS, 0, 0)
+    INT end_pos   = SendMessageA(hControl, SCI_GETANCHOR, 0, 0)
+
+    IF start_pos <> end_pos THEN
+        SendMessageA(hControl, SCI_REPLACESEL, 0, &textToRep)
+        doFind(w, g_hSciCtrl, textToFind, ignoreCase)
+    ELSE
+        doFind(w, g_hSciCtrl, textToFind, ignoreCase)
+    ENDIF
+    RETURN
+ENDSUB
+
+SUB doReplaceAll(WINDOW w, INT ctrlID, STRING textToFind, STRING textToRep, INT ignoreCase)
+    IF textToFind = "" THEN RETURN
+
+    UINT hControl = g_hSciCtrl
+    IF hControl = 0 THEN RETURN
+
+    INT count = 0
+    INT searchPos = 0
+    INT findByteLen = GetUTF8ByteLength(textToFind)
+    INT repByteLen  = GetUTF8ByteLength(textToRep)
+
+    IF findByteLen <= 0 THEN RETURN
+
+    INT searchFlags = 0
+    IF ignoreCase = FALSE THEN searchFlags = searchFlags | SCFIND_MATCHCASE
+    IF match_word <> 0    THEN searchFlags = searchFlags | SCFIND_WHOLEWORD
+
+    SendMessageA(hControl, SCI_SETSEARCHFLAGS, searchFlags, 0)
+
+    SendMessageA(hControl, SCI_BEGINUNDOACTION, 0, 0)
+
+    INT docLen = SendMessageA(hControl, SCI_GETLENGTH, 0, 0)
+
+    WHILE searchPos < docLen
+        SendMessageA(hControl, SCI_SETTARGETSTART, searchPos, 0)
+        SendMessageA(hControl, SCI_SETTARGETEND, docLen, 0)
+
+        INT pos = SendMessageA(hControl, SCI_SEARCHINTARGET, findByteLen, &textToFind)
+
+        IF pos = -1 THEN BREAK
+
+        INT matchStart = SendMessageA(hControl, SCI_GETTARGETSTART, 0, 0)
+        SendMessageA(hControl, SCI_REPLACETARGET, repByteLen, &textToRep)
+
+        count++
+
+        searchPos = matchStart + repByteLen
+        docLen = SendMessageA(hControl, SCI_GETLENGTH, 0, 0)
+    WEND
+
+    SendMessageA(hControl, SCI_ENDUNDOACTION, 0, 0)
+
+    'MESSAGEBOX search_dlg, STR$(count) + " replacements made.", "Replace Text"
+    ShowBalloonToast("Replace Text", STR$(count) + " replacements made.")
+    RETURN
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Native Scintilla Undo and Redo Dispatchers
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DoUndo(WINDOW w, INT ctrlID)
+    IF SendMessageA(g_hSciCtrl, SCI_CANUNDO, 0, 0) <> 0 THEN
+        SendMessageA(g_hSciCtrl, SCI_UNDO, 0, 0)
+        SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+        UpdateGutter()
+        UpdateStatusBar()
+    ENDIF
+ENDSUB
+
+SUB DoRedo(WINDOW w, INT ctrlID)
+    IF SendMessageA(g_hSciCtrl, SCI_CANREDO, 0, 0) <> 0 THEN
+        SendMessageA(g_hSciCtrl, SCI_REDO, 0, 0)
+        SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+        UpdateGutter()
+        UpdateStatusBar()
+    ENDIF
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Helper Subroutines
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB CreateHotToolbarBitmap(INT hBmpSrc), INT
+    IF hBmpSrc = 0 THEN RETURN 0
+
+    INT hDC = GetDC(WIN.hwnd)
+    INT hMemSrc = CreateCompatibleDC(hDC)
+    INT hMemDst = CreateCompatibleDC(hDC)
+
+    BITMAP bm
+    GetObjectA(hBmpSrc, LEN(bm), &bm)
+
+    INT w = bm.bmWidth
+    INT h = bm.bmHeight
+
+    INT hBmpHot = CreateCompatibleBitmap(hDC, w, h)
+
+    INT hOldSrc = SelectObject(hMemSrc, hBmpSrc)
+    INT hOldDst = SelectObject(hMemDst, hBmpHot)
+
+    INT x, y
+    DWORD pxColor, r, g, b
+
+    For y = 0 TO h - 1
+        For x = 0 TO w - 1
+            pxColor = _GetPixel(hMemSrc, x, y)
+            
+            r = pxColor & 0xFF
+            g = (pxColor >> 8) & 0xFF
+            b = (pxColor >> 16) & 0xFF
+
+            ' Lighten non-background pixels (assuming RGB 192,192,192 or transparent color isn't touched)
+            IF (r <> 255) OR (g <> 0) OR (b <> 255) THEN
+                r = r + 35 : IF r > 255 THEN r = 255
+                g = g + 35 : IF g > 255 THEN g = 255
+                b = b + 35 : IF b > 255 THEN b = 255
+            ENDIF
+
+            SetPixelV(hMemDst, x, y, (b << 16) | (g << 8) | r)
+        Next x
+    Next y
+
+    SelectObject(hMemSrc, hOldSrc)
+    SelectObject(hMemDst, hOldDst)
+
+    DeleteDC(hMemSrc)
+    DeleteDC(hMemDst)
+    ReleaseDC(WIN.hwnd, hDC)
+
+    RETURN hBmpHot
+ENDSUB
+
+SUB CreateDisabledToolbarBitmap(INT hBmpSrc), INT
+    IF hBmpSrc = 0 THEN RETURN 0
+
+    INT hDC = GetDC(WIN.hwnd)
+    INT hMemSrc = CreateCompatibleDC(hDC)
+    INT hMemDst = CreateCompatibleDC(hDC)
+
+    BITMAP bm
+    GetObjectA(hBmpSrc, LEN(bm), &bm)
+
+    INT w = bm.bmWidth
+    INT h = bm.bmHeight
+
+    INT hBmpDisabled = CreateCompatibleBitmap(hDC, w, h)
+
+    INT hOldSrc = SelectObject(hMemSrc, hBmpSrc)
+    INT hOldDst = SelectObject(hMemDst, hBmpDisabled)
+
+    INT x, y
+    DWORD pxColor, r, g, b, gray
+
+    For y = 0 TO h - 1
+        For x = 0 TO w - 1
+            pxColor = _GetPixel(hMemSrc, x, y)
+            
+            r = pxColor & 0xFF
+            g = (pxColor >> 8) & 0xFF
+            b = (pxColor >> 16) & 0xFF
+
+            ' Preserve transparent/background mask color (e.g., RGB 192,192,192)
+            IF (r = 255) AND (g = 0) AND (b = 255) THEN
+                SetPixelV(hMemDst, x, y, pxColor)
+            ELSE
+                ' Convert to gray scale & lower contrast/brightness
+                gray = INT((r * 0.299) + (g * 0.587) + (b * 0.114))
+                gray = 128 + (gray / 2) ' Soft muted gray
+                SetPixelV(hMemDst, x, y, (gray << 16) | (gray << 8) | gray)
+            ENDIF
+        Next x
+    Next y
+
+    SelectObject(hMemSrc, hOldSrc)
+    SelectObject(hMemDst, hOldDst)
+
+    DeleteDC(hMemSrc)
+    DeleteDC(hMemDst)
+    ReleaseDC(WIN.hwnd, hDC)
+
+    RETURN hBmpDisabled
+ENDSUB
+
+SUB RotateBitmap90(INT hBmpSrc), INT
+    INT hDC = GetDC(WIN.hwnd)
+    INT hMemSrc = CreateCompatibleDC(hDC)
+    INT hMemDst = CreateCompatibleDC(hDC)
+
+    BITMAP bm
+    GetObjectA(hBmpSrc, LEN(bm), &bm)
+
+    INT srcW = bm.bmWidth
+    INT srcH = bm.bmHeight
+    INT dstW = srcH
+    INT dstH = srcW
+
+    INT hBmpDst = CreateCompatibleBitmap(hDC, dstW, dstH)
+
+    INT hOldSrc = SelectObject(hMemSrc, hBmpSrc)
+    INT hOldDst = SelectObject(hMemDst, hBmpDst)
+
+    INT x, y
+    DWORD pxColor = 0
+
+    For y = 0 TO srcH - 1
+        For x = 0 TO srcW - 1
+            pxColor = _GetPixel(hMemSrc, x, y)
+            SetPixelV(hMemDst, (srcH - 1) - y, x, pxColor)
+        Next x
+    Next y
+
+    SelectObject(hMemSrc, hOldSrc)
+    SelectObject(hMemDst, hOldDst)
+
+    DeleteDC(hMemSrc)
+    DeleteDC(hMemDst)
+    ReleaseDC(WIN.hwnd, hDC)
+
+    RETURN hBmpDst
+ENDSUB
+
+SUB IsFileChanged()
+    RET = g_IsDirty
+    
+    IF RET = TRUE THEN
+        IF YesNoBox(WIN, "File was modified. Save changes ?", "Tpad") THEN
+            IF fName <> "" THEN Save_As = 0 ELSE Save_As = 1
+            DoSave()
+        ELSE
+            CancelAction = FALSE
+        ENDIF
+    ENDIF
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Wine/Linux Safe Monospaced Font Resolver
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB GetSafeMonoFont(STRING preferredFont$), STRING
+    IF LEN(preferredFont$) = 0 THEN preferredFont$ = "Consolas"
+
+    INT hDC = GetDC(WIN.hwnd)
+    IF hDC = 0 THEN RETURN "Monospace"
+
+    INT hTest = CreateFontA(-13, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 1, preferredFont$)
+    IF hTest <> 0 THEN
+        DeleteObject(hTest)
+        ReleaseDC(WIN.hwnd, hDC)
+        RETURN preferredFont$
+    ENDIF
+
+    STRING fallbacks[4]
+    fallbacks[0] = "Courier New"
+    fallbacks[1] = "Liberation Mono"
+    fallbacks[2] = "DejaVu Sans Mono"
+    fallbacks[3] = "Monospace"
+    INT i = 0
+
+    FOR i = 0 TO 3
+        hTest = CreateFontA(-13, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 0, 1, fallbacks[i])
+        IF hTest <> 0 THEN
+            DeleteObject(hTest)
+            ReleaseDC(WIN.hwnd, hDC)
+            RETURN fallbacks[i]
+        ENDIF
+    NEXT i
+
+    ReleaseDC(WIN.hwnd, hDC)
+    RETURN "Monospace"
+ENDSUB
+
+SUB InitUIFont()
+    INT fontHeight = -MulDiv(g_App.fontSize, GetDeviceCaps(GetDC(WIN.hwnd), 90), 72)
+    
+    g_hUIFont = CreateFontA(fontHeight, 0, 0, 0, g_App.fontWeight, 0, 0, 0, _
+                            0, 0, 0, 0, 0, g_App.fontName)
+ENDSUB
+
+SUB IsRunningUnderWine(), INT
+    UINT hNTDLL = GetModuleHandleA("ntdll.dll")
+    IF hNTDLL <> 0
+        POINTER pWineVer = GetProcAddress(hNTDLL, "wine_get_version")
+        IF pWineVer <> 0 THEN RETURN TRUE
+    ENDIF
+    RETURN FALSE
+ENDSUB
+
+SUB CleanupUIFont()
+    IF g_hUIFont <> 0
+        DeleteObject(g_hUIFont)
+        g_hUIFont = 0
+    ENDIF
+ENDSUB
+
+SUB EnumSetFontProc(UINT hWndChild, UINT hFont), INT
+    IF hWndChild <> 0 AND hFont <> 0
+        SendMessageA(hWndChild, 0x0030, hFont, TRUE)
+    ENDIF
+    RETURN TRUE
+ENDSUB
+
+SUB InjectUIFont(UINT hDlg)
+    IF hDlg = 0 THEN RETURN
+
+    INT fontHeight = -MulDiv(g_App.fontSize, 96, 72)
+
+    ' Try Consolas 10pt. first
+    UINT hTempFont = CreateFontA(fontHeight, 0, 0, 0, 10, 0, 0, 0, _
+                                 0, 0, 0, 0, 0, "Consolas")
+
+    IF hTempFont = 0
+        ' Fallback to Courier New 9pt.
+        hTempFont = CreateFontA(fontHeight, 0, 0, 0, 9, 0, 0, 0, _
+                                0, 0, 0, 0, 0, "Courier New")
+    ENDIF
+
+    IF hTempFont <> 0
+        SendMessageA(hDlg, 0x0030, hTempFont, TRUE)
+        EnumChildWindows(hDlg, &EnumSetFontProc, hTempFont)
+    ENDIF
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': FileNew - Baseline Initialization for Empty Document
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB FileNew()
+    StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+
+    ClearAllBookmarks()
+    g_App.isANSI = 0
+    
+    g_IsLoading = TRUE
+
+    SendMessageA(g_hSciCtrl, SCI_SETUNDOCOLLECTION, TRUE, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETTEXT, 0, &"")
+    
+    fName = ""
+    g_CurrentLoadedPath = ""
+    Save_As = 1
+
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 1, "0 B"
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 2, "UTF-8"
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 3, "CRLF"
+
+    SendMessageA(g_hSciCtrl, SCI_EMPTYUNDOBUFFER, 0, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETSAVEPOINT, 0, 0)
+
+    g_IsDirty = FALSE
+    g_CachedCaption$ = ""
+    UpdateTitleBar()
+
+    SetFocusA(g_hSciCtrl)
+
+    g_IsLoading = FALSE
+    UpdateStatusBar()
+
+    StartTimer(WIN, 1000, FILE_MONITOR_TIMER_ID)
+    ApplyThemeStyles(g_App.themeID)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': FileOpen - Deterministic Loading Protocol
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DoOpen()
+    StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+
+    SetProcessSpeed(2)
+
+    DWORD startTime = GetTickCount()
+
+    STRING selectedPath$ = ""
+    IF fName = "" THEN
+        selectedPath$ = FileRequest("Open File", WIN, 1, Filter$, "txt")
+    ELSE
+        selectedPath$ = fName
+    ENDIF
+
+    IF LEN(selectedPath$) = 0 THEN
+        fName = ""
+        SetProcessSpeed(1)
+        RETURN TRUE
+    ENDIF
+
+    IF LEN(selectedPath$) >= 260 THEN
+        'MESSAGEBOX(WIN, , MB_OK | MB_ICONERROR)
+        ShowBalloonToast("Path Too Long", "The selected file path exceeds MAX_PATH (260 characters):" + g_CRLF + selectedPath$)
+        fName = ""
+        SetProcessSpeed(1)
+        RETURN TRUE
+    ENDIF
+
+    fName = selectedPath$
+    g_IsLoading = TRUE
+
+    INT loadSuccess = LoadMemoryMappedFile(fName)
+
+    IF loadSuccess = TRUE THEN
+        ClearAllBookmarks()
+
+        newName = fName
+        mruArray()
+
+        g_CurrentLoadedPath = fName
+        StartFileMonitoring()
+
+        g_IsDirty = FALSE
+        g_CachedCaption$ = ""
+        UpdateTitleBar()
+
+        SetLexerByExtension(fName)
+
+        UpdateGutter()
+        IF g_hSciCtrl <> 0 THEN SetFocusA(g_hSciCtrl)
+
+        IF g_hSciCtrl <> 0 THEN
+            SendMessageA(g_hSciCtrl, SCI_EMPTYUNDOBUFFER, 0, 0)
+            SendMessageA(g_hSciCtrl, SCI_SETSAVEPOINT, 0, 0)
+        ENDIF
+
+    ELSE
+        fName = ""
+    ENDIF
+
+    g_IsLoading = FALSE
+    UpdateStatusBar()
+    StartTimer(WIN, 1000, FILE_MONITOR_TIMER_ID)
+
+    SetProcessSpeed(1)
+    DoResize()
+    ApplyThemeStyles(g_App.themeID)
+
+    ' Display balloon toast after load pass completes
+    IF loadSuccess = TRUE THEN
+        DWORD endTime = GetTickCount()
+        DOUBLE elapsedSec = (endTime - startTime) / 1000.0
+        IF elapsedSec < 0.01 THEN elapsedSec = 0.01
+
+        DWORD bytesRead = SendMessageA(g_hSciCtrl, SCI_GETTEXTLENGTH, 0, 0)
+
+        ISTRING szSize[32]
+        GetReadableFileSize(bytesRead, &szSize)
+
+        ISTRING szTitle[64]
+        ISTRING szMsg[256]
+
+        szTitle = "Tpad Notification"
+        wsprintfA(&szMsg, "Loaded %s in %u.%02u seconds !", &szSize, INT(elapsedSec), INT((elapsedSec - INT(elapsedSec)) * 100.0))
+
+        ShowBalloonToast(&szTitle, &szMsg)
+    ENDIF
+
+    RETURN TRUE
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': DoSave - File Saving Engine with State Clearing
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DoSave()
+    StopTimer(WIN, FILE_MONITOR_TIMER_ID)
+
+    INT fl = 0
+    INT saveSuccess = FALSE
+    ISTRING eolBuf[16]
+
+    IF Save_As = 1 OR fName = "" THEN
+        fName = FileRequest("Save File", WIN, 0, Filter$, "txt", 0)
+    ENDIF
+
+    IF LEN(fName) = 0 THEN
+        IF g_IsFileMonitored AND g_CurrentLoadedPath <> "" THEN
+            STARTTIMER WIN, FILE_MONITOR_INTERVAL, FILE_MONITOR_TIMER_ID
+        ENDIF
+        RETURN
+    ENDIF
+
+    INT pathLen = LEN(fName)
+    IF pathLen >= 260 THEN
+        'MESSAGEBOX(WIN, "The target file path exceeds the Win32 MAX_PATH limit (260 characters):" + g_CRLF + fName, "Path Too Long", MB_OK | MB_ICONERROR)
+        ShowBalloonToast("Path Too Long", "The selected file path exceeds MAX_PATH (260 characters):" + g_CRLF + fName)
+        IF g_IsFileMonitored AND g_CurrentLoadedPath <> "" THEN
+            STARTTIMER WIN, FILE_MONITOR_INTERVAL, FILE_MONITOR_TIMER_ID
+        ENDIF
+        RETURN
+    ENDIF
+
+    ISTRING safePath$[1024]
+    safePath$ = fName
+
+    IF IsFileReadOnly(safePath$, fl) THEN
+        IF fl = TRUE THEN ChangeFileReadOnly(safePath$, 0)
+    ENDIF
+
+    saveSuccess = SaveBufferToFile(safePath$)
+
+    IF saveSuccess = TRUE THEN
+        DWORD FSIZE = 0
+        HANDLE hCheck = CreateFileA(safePath$, FILE_READ_DATA, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)
+        IF hCheck <> INVALID_HANDLE_VALUE THEN
+            FSIZE = GetFileSize(hCheck, NULL)
+            CloseHandle(hCheck)
+        ENDIF
+
+        lstrcpynA(&eolBuf, g_App.eolMode, 15)
+
+        ISTRING sizeStr[32]
+        GetReadableFileSize(FSIZE, &sizeStr)
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 1, sizeStr
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 2, g_App.isANSI
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 3, eolBuf
+
+        SendMessageA(g_hSciCtrl, SCI_SETSAVEPOINT, 0, 0)
+        
+        g_IsDirty = FALSE
+        g_CurrentLoadedPath = safePath$
+        fName = safePath$
+        Save_As = 0
+
+        UpdateTitleBar()
+        SetFocusA(g_hSciCtrl)
+        UpdateStatusBar()
+
+        StartFileMonitoring()
+    ELSE
+        IF g_IsFileMonitored AND g_CurrentLoadedPath <> "" THEN
+            StartTimer(WIN, 1000, FILE_MONITOR_TIMER_ID)
+        ENDIF
+        RETURN
+    ENDIF
+ENDSUB
+
+SUB DoPrint()
+    UINT hPrt
+    STRING printName
+    INT pagefrom = 1, pageto = 1, copies = 1, collate = 0
+    printName = PRTDIALOG(NULL, pagefrom, pageto, copies, collate)
+    If (hPrt)
+        INT txtLen = 0
+        txtLen = SendMessageA(g_hSciCtrl, SCI_GETTEXT, 0, 0)
+        IF txtLen > 0 THEN
+            POINTER pBuf = SafeAllocHeap(txtLen + 2)
+            IF pBuf <> 0 THEN
+                SendMessageA(g_hSciCtrl, SCI_GETTEXT, txtLen + 1, pBuf)
+                WRITEPRINTER hPrt, #<STRING>pBuf
+                SafeFreeHeap(pBuf)
+            ENDIF
+        ENDIF
+        CLOSEPRINTER hPrt
+    EndIf
+EndSub
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Layout & Resizing Engine (Optimized for Live Dragging)
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DoResize()
+    INT totalLines
+    GetClientSize WIN, posLEFT, posTOP, posWIDTH, posHEIGHT
+    SendMessage(WIN, SB_GETRECT, 0, BRECT, STATUS_1)
+    STATUS_HEIGHT = BRECT.BOTTOM - BRECT.TOP
+    
+    PARTS = posWIDTH - 380, posWIDTH - 290, posWIDTH - 190, posWIDTH - 130, posWIDTH - 85, posWIDTH - 45, -1
+    CONTROLCMD WIN, STATUS_1, @SWSETPANES, 7, PARTS
+    CONTROLCMD WIN, STATUS_1, @SWRESIZE
+
+    SetSize WIN, 0, 0, posWIDTH, 26, 2000
+
+    IF g_IsResizing = FALSE THEN
+        SendMessage(hToolBar, TB_AUTOSIZE, 0, 0)
+    ENDIF
+
+    SetSize WIN, 420, 3, 73, 20, 101
+    SetSize WIN, 496, 3, 40, 20, 102
+    SetSize WIN, 539, 3, 40, 20, 103
+    SetSize WIN, 582, 3, 40, 20, 104
+
+    INT numCharW = 8
+    INT hdcScreen = GetDC(WIN.HWND)
+    
+    IF hdcScreen <> 0 THEN
+        INT fontHeight = -MulDiv(g_App.fontSize, GetDeviceCaps(hdcScreen, 90), 72)
+        INT hAppFont = CreateFontA(fontHeight, 0, 0, 0, g_App.fontWeight, 0, 0, 0, _
+                                   0, 0, 0, 0, 0, g_App.fontName)
+        
+        IF hAppFont <> 0 THEN
+            INT oldF = SelectObject(hdcScreen, hAppFont)
+            SIZE charSize
+            
+            IF GetTextExtentPoint32A(hdcScreen, "0", 1, &charSize) <> 0 THEN
+                numCharW = charSize.cx
+            ENDIF
+            
+            SelectObject(hdcScreen, oldF)
+            DeleteObject(hAppFont)
+        ENDIF
+        
+        ReleaseDC(WIN.HWND, hdcScreen)
+    ENDIF
+
+    IF numCharW <= 0 THEN numCharW = 8
+
+    totalLines = 1
+    IF g_hSciCtrl <> 0 THEN
+        totalLines = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0)
+    ENDIF
+    IF totalLines < 1 THEN totalLines = 1
+
+    INT numDigits = LEN(STR$(totalLines))
+    IF numDigits < 3 THEN numDigits = 3
+
+    gutterW = (numDigits * numCharW) + 21
+    IF gutterW < 64 THEN gutterW = 64
+
+    INT topToolbarH = 26
+    INT clientTop = posTOP + topToolbarH
+    INT clientHeight = (posHEIGHT - STATUS_HEIGHT) - topToolbarH
+    INT editH = clientHeight - (textH + 2)
+    INT editW = posWIDTH - gutterW
+
+    SetSize W0, posLEFT, clientTop, posWIDTH, textH + 2
+    SetSize W1, posLEFT, clientTop + textH + 2, gutterW, editH
+    SetWindowPos(g_hSciCtrl, 0, posLEFT + gutterW, clientTop + textH + 2, editW, editH, SWP_NOZORDER | SWP_NOACTIVATE)
+
+    IF g_IsResizing = TRUE THEN
+        InvalidateRect(W1.HWND, NULL, FALSE)
+        InvalidateRect(W0.HWND, NULL, FALSE)
+    ELSE
+        UpdateGutter()
+        DrawRuler()
+        InvalidateRect(W0.HWND, NULL, FALSE)
+        InvalidateRect(W1.HWND, NULL, FALSE)
+        InvalidateRect(g_hSciCtrl, NULL, FALSE)
+    ENDIF
+ENDSUB
+
+SUB InitRuler()
+    OpenWindow W0, 0, 0, 0, 0, WS_CHILD | WS_VISIBLE | SS_NOTIFY | @NoCaption | @noautodraw | 0x4, WIN.hwnd, "", &RulerWndProc
+    SetWindowSubclass(W0.hwnd, &subclassProc, subclassID2, 0)
+    SetFont W0, g_App.fontName, g_App.fontSize, g_App.fontWeight, g_App.fontFlags
+    GETTEXTSIZE(W0, "0", textW, textH)
+    SetWindowColor(W0, RGB(224, 220, 224))
+    FrontPen W0, RGB(64, 64, 64)
+    BackPen W0, RGB(224, 220, 224)
+
+    INT fHeight = textH
+    IF fHeight <= 0 THEN fHeight = 15
+    STRING activeFontName = g_App.fontName
+    IF activeFontName = "" THEN activeFontName = "Consolas"
+
+    g_hRulerFont        = CreateFont(fHeight, 0, 0, 0, g_App.fontWeight, (g_App.fontFlags & 2), (g_App.fontFlags & 4), 0, 0, 0, 0, 0, 0, activeFontName)
+    g_hRulerSepPen      = CreatePen(PS_SOLID, 1, RGB(160, 160, 170))
+    g_hRulerPolePen     = CreatePen(PS_SOLID, 1, RGB(70, 70, 80))
+    g_hRulerFlagPen     = CreatePen(PS_SOLID, 1, RGB(0, 100, 40))
+    g_hRulerFlagBrush   = CreateSolidBrush(RGB(0, 220, 100))
+    g_hRulerArrowPen    = CreatePen(PS_SOLID, 1, RGB(60, 60, 70))
+    g_hRulerEraserPen   = CreatePen(PS_SOLID, 1, RGB(180, 80, 100))
+    g_hRulerEraserBrush = CreateSolidBrush(RGB(240, 130, 150))
+ENDSUB
+
+SUB InitGutter()
+    OpenWindow W1, 0, 0, 0, 0, WS_CHILD | WS_VISIBLE | SS_NOTIFY | @NoCaption | @noautodraw | 0x4, WIN.hwnd, "", &GutterWndProc
+    SetWindowSubclass(W1.hwnd, &subclassProc, subclassID, 0)
+    SetFont W1, g_App.fontName, g_App.fontSize, g_App.fontWeight, g_App.fontFlags
+    GETTEXTSIZE(W1, "0", textW, textH)
+    SetWindowColor(W1, RGB(224, 220, 224))
+    FrontPen W1, RGB(64, 64, 64)
+    BackPen W1, RGB(224, 220, 224)
+ENDSUB
+
+SUB GutterWndProc(), INT
+    Select @CLASS
+        Case @IDPAINT
+            UpdateGutter()
+            ValidateRect(W1.hwnd, NULL)
+
+        Case WM_ERASEBKGND
+            RETURN 1
+
+        Case WM_LBUTTONDOWN
+            INT clickY = @MOUSEY
+
+            IF g_hSciCtrl <> 0 THEN
+                INT firstVisLine = SendMessageA(g_hSciCtrl, SCI_GETFIRSTVISIBLELINE, 0, 0)
+                
+                INT lineH = SendMessageA(g_hSciCtrl, SCI_TEXTHEIGHT, 0, 0)
+                IF lineH <= 0 THEN lineH = 15
+
+                INT clickedVisLine = firstVisLine + (clickY / lineH)
+                
+                INT clickedDocLine = SendMessageA(g_hSciCtrl, SCI_DOCLINEFROMVISIBLE, clickedVisLine, 0)
+                INT totalLines     = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0)
+
+                IF clickedDocLine >= 0 AND clickedDocLine < totalLines THEN
+                    ToggleBookmark(clickedDocLine)
+                    UpdateGutter()
+                    InvalidateRect(W1.hwnd, NULL, FALSE)
+                ENDIF
+            ENDIF
+            RETURN 0
+
+    EndSelect
+    RETURN 0
+ENDSUB
+
+SUB subclassProc(hWnd : INT, uMsg : INT, wParam : INT, lParam : INT, uIdSubclass : UINT_PTR, dwRefData : DWORD_PTR), INT
+    Select uMsg
+        Case WM_PAINT
+            DefSubclassProc(hWnd, uMsg, wParam, lParam)
+            HSCROLLPOS = SendMessageA(g_hSciCtrl, SCI_SETHSCROLLBAR, 0, 0)
+            DrawRuler()
+            UpdateGutter()
+            RETURN 0
+    EndSelect
+
+    RETURN DefSubclassProc(hWnd, uMsg, wParam, lParam)
+EndSub
+
+SUB RulerWndProc(), INT
+    STATIC INT isHoveringToolbar = FALSE
+
+    Select @CLASS
+        Case @IDPAINT
+            HSCROLLPOS = SendMessageA(g_hSciCtrl, SCI_SETHSCROLLBAR, 0, 0)
+            DrawRuler()
+            ValidateRect(W0.hwnd, NULL)
+
+        Case WM_ERASEBKGND
+            RETURN 1
+
+        Case WM_MOUSEMOVE
+
+            ' Check if mouse is anywhere over the microtoolbar region
+            IF (@mouseX >= 1) & (@mousex <= gutterW) THEN
+                IF isHoveringToolbar = FALSE THEN
+                    isHoveringToolbar = TRUE
+                    ShowBalloonToast("Bookmark Shortcuts", "<CTRL>+F2 : Toggle Bookmark" + g_CRLF + "F2 : Next Bookmark" + g_CRLF + "<SHIFT>+F2 : Previous Bookmark")
+                ENDIF
+            ELSE
+                IF isHoveringToolbar = TRUE THEN
+                    isHoveringToolbar = FALSE
+                    HideBalloonToast()
+                ENDIF
+            ENDIF
+            RETURN 0
+
+        Case WM_MOUSELEAVE
+            isHoveringToolbar = FALSE
+            HideBalloonToast()
+            RETURN 0
+
+        Case WM_LBUTTONDOWN
+            INT clickX = @MOUSEX
+
+            IF clickX < gutterW THEN
+                DWORD selStart = 0
+                selStart = SendMessageA(g_hSciCtrl, SCI_GETCURRENTPOS, 0, 0)
+                INT caretLine = 0
+                caretLine = SendMessageA(g_hSciCtrl, SCI_LINEFROMPOSITION, selStart, 0)
+                INT totalLines = 1
+                totalLines = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0)
+
+                IF clickX >= 2 AND clickX <= 15 THEN
+                    ToggleBookmark(caretLine)
+                    UpdateGutter()
+                ELSEIF clickX >= 16 AND clickX <= 29 THEN
+                    GotoPrevBookmark(caretLine, totalLines)
+                ELSEIF clickX >= 30 AND clickX <= 42 THEN
+                    GotoNextBookmark(caretLine, totalLines)
+                ELSEIF clickX >= 43 AND clickX <= 61 THEN
+                    ClearAllBookmarks()
+                    UpdateGutter()
+                ENDIF
+                RETURN 0
+            ENDIF
+
+    EndSelect
+    RETURN 0
+ENDSUB
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': File Monitoring Engine Subroutines
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB GetFileWriteTime(POINTER pFilePath, POINTER pFileTime), INT
+    IF pFilePath = NULL OR pFileTime = NULL THEN RETURN FALSE
+
+    HANDLE hFile = CreateFileA(#<STRING>pFilePath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)
+    IF hFile = INVALID_HANDLE_VALUE THEN RETURN FALSE
+
+    INT result = GetFileTime(hFile, NULL, NULL, pFileTime)
+    CloseHandle(hFile)
+    RETURN result
+ENDSUB
+
+SUB StartFileMonitoring()
+    IF g_CurrentLoadedPath = "" THEN
+        g_IsFileMonitored = FALSE
+        STOPTIMER WIN, FILE_MONITOR_TIMER_ID
+        RETURN
+    ENDIF
+
+    IF GetFileWriteTime(&g_CurrentLoadedPath, &g_LastFileWriteTime) = TRUE THEN
+        g_IsFileMonitored = TRUE
+        STARTTIMER WIN, FILE_MONITOR_INTERVAL, FILE_MONITOR_TIMER_ID
+    ELSE
+        g_IsFileMonitored = FALSE
+    ENDIF
+ENDSUB
+
+SUB CheckFileStatus()
+    IF g_IsFileMonitored = FALSE OR g_CurrentLoadedPath = "" THEN RETURN
+
+    FILETIME currentWriteTime
+    RtlZeroMemory(&currentWriteTime, LEN(currentWriteTime))
+
+    IF GetFileWriteTime(&g_CurrentLoadedPath, &currentWriteTime) = TRUE THEN
+        IF CompareFileTime(&g_LastFileWriteTime, &currentWriteTime) <> 0 THEN
+            STOPTIMER WIN, FILE_MONITOR_TIMER_ID
+
+            STRING msg = "The file on disk has been modified by another program:" + g_CRLF
+            msg = msg + g_CurrentLoadedPath + g_CRLF + g_CRLF
+            msg = msg + "Do you want to reload it?"
+
+            INT choice = MESSAGEBOX(WIN, msg, "File Modified Outside Tpad", MB_YESNO | MB_ICONQUESTION)
+            IF choice = IDYES THEN
+                fName = g_CurrentLoadedPath
+                IF LoadMemoryMappedFile(g_CurrentLoadedPath) THEN
+                    SendMessageA(g_hSciCtrl, SCI_EMPTYUNDOBUFFER, 0, 0)
+                    GetFileWriteTime(&g_CurrentLoadedPath, &g_LastFileWriteTime)
+                    g_IsDirty = FALSE
+                    UpdateTitleBar()
+                ENDIF
+            ELSE
+                fName = g_CurrentLoadedPath
+                g_LastFileWriteTime = currentWriteTime
+            ENDIF
+
+            STARTTIMER WIN, FILE_MONITOR_INTERVAL, FILE_MONITOR_TIMER_ID
+       ENDIF
+    ELSE
+        STOPTIMER WIN, FILE_MONITOR_TIMER_ID
+        g_IsFileMonitored = FALSE
+        
+        STRING errMsg = "The open file has been deleted or removed from disk:" + g_CRLF
+        errMsg = errMsg + g_CurrentLoadedPath
+        MESSAGEBOX(WIN, errMsg, "File Removed", MB_OK | MB_ICONWARNING)
+    ENDIF
+ENDSUB
+
+SUB EDIT(HWND : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+    STATIC INT bSkipChar = FALSE
+    INT selStart, caretLine, res
+    INT isCtrlDown = FALSE
+    INT isAltDown  = FALSE
+
+    ' Use GetKeyState to read the thread message queue state
+    IF (GetKeyState(VK_CONTROL) & 0x8000) THEN isCtrlDown = TRUE
+    IF (GetKeyState(VK_MENU)    & 0x8000) THEN isAltDown  = TRUE
+
+    ' Ignore Ctrl if AltGr is pressed (AltGr = Ctrl + Alt on European layouts)
+    IF isAltDown THEN isCtrlDown = FALSE
+
+    Select uMsg
+        Case WM_KEYDOWN
+            bSkipChar = FALSE
+
+            IF wParam = VK_ESCAPE THEN
+                bSkipChar = TRUE
+                SendMessageA(WIN.hwnd, WM_COMMAND, CMD_EXIT, 0)
+                RETURN 0
+            ENDIF
+
+            IF wParam = VK_F2 THEN
+                bSkipChar = TRUE
+                selStart = SendMessageA(HWND, SCI_GETCURRENTPOS, 0, 0)
+                caretLine = SendMessageA(HWND, SCI_LINEFROMPOSITION, selStart, 0)
+                INT totLines = SendMessageA(HWND, SCI_GETLINECOUNT, 0, 0)
+
+                IF isCtrlDown THEN
+                    ToggleBookmark(caretLine)
+                    UpdateGutter()
+                    RETURN 0
+                ELSEIF GetKeyState(VK_SHIFT) & 0x8000 THEN
+                    GotoPrevBookmark(caretLine, totLines)
+                    RETURN 0
+                ELSE
+                    GotoNextBookmark(caretLine, totLines)
+                    RETURN 0
+                ENDIF
+            ENDIF
+
+            IF isCtrlDown THEN
+                SELECT wParam
+                    CASE 0x46 ' Ctrl+F
+                        bSkipChar = TRUE
+                        Show_Find(WIN, HWND, FALSE)
+                        RETURN 0
+
+                    CASE 0x48 ' Ctrl+H
+                        bSkipChar = TRUE
+                        Show_Find(WIN, HWND, TRUE)
+                        RETURN 0
+                ENDSELECT
+            ENDIF
+
+        Case WM_CHAR
+            ' Suppress character generation from any shortcut handled in WM_KEYDOWN
+            IF bSkipChar THEN
+                bSkipChar = FALSE
+                RETURN 0
+            ENDIF
+
+            ' Block unhandled Ctrl+Key ASCII control characters (0-31) from reaching Scintilla
+            IF isCtrlDown AND wParam < 32 THEN
+                RETURN 0
+            ENDIF
+
+        Case WM_UNICHAR
+            IF bSkipChar THEN
+                bSkipChar = FALSE
+                RETURN 0
+            ENDIF
+    EndSelect
+
+    res = CallWindowProcA(ORIG, HWND, uMsg, wParam, lParam)
+
+    IF uMsg = WM_CHAR OR uMsg = WM_KEYDOWN OR uMsg = WM_VSCROLL OR uMsg = WM_HSCROLL OR uMsg = WM_MOUSEWHEEL OR uMsg = WM_LBUTTONUP THEN
+        PostMessageA(WIN.hwnd, 32800, 0, 0)
+    ENDIF
+
+    RETURN res
+ENDSUB
+
+SUB Edit_Scroll_2bottom()
+    INT lcount, chrIndex
+    lcount = 0
+    lcount = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0) - 1
+    chrIndex = 0
+    chrIndex = SendMessageA(g_hSciCtrl, SCI_POSITIONFROMLINE, lcount, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETSEL, chrIndex, chrIndex)
+    SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+    UpdateGutter()
+    SetFocusA(g_hSciCtrl)
+EndSub
+
+SUB Edit_Scroll_2Top()
+    SendMessageA(g_hSciCtrl, SCI_SETSEL, 0, 0)
+    SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+    UpdateGutter()
+    SetFocusA(g_hSciCtrl)
+EndSub
+
+SUB Edit_Scroll_2Line()
+    INT lcount, chrIndex
+    lcount = VAL(GETCONTROLTEXT WIN, 101) - 1
+    chrIndex = 0
+    chrIndex = SendMessageA(g_hSciCtrl, SCI_POSITIONFROMLINE, lcount, 0)
+    SendMessageA(g_hSciCtrl, SCI_SETSEL, chrIndex, chrIndex)
+    SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+    UpdateGutter()
+    SetFocusA(g_hSciCtrl)
+EndSub
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Check, Toggle, Clear, and Navigate Bookmarks
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB IsLineBookmarked(INT lineIdx), INT
+    IF lineIdx < 0 OR lineIdx >= MAX_BOOKMARK_LINES THEN RETURN FALSE
+    INT dwordIdx = lineIdx / 32
+    INT bitIdx   = lineIdx % 32
+    IF (g_BookmarkMask[dwordIdx] & (1 << bitIdx)) THEN
+        RETURN TRUE
+    ENDIF
+    RETURN FALSE
+ENDSUB
+
+SUB ToggleBookmark(INT lineIdx)
+    IF lineIdx < 0 OR lineIdx >= MAX_BOOKMARK_LINES THEN RETURN
+    INT dwordIdx = lineIdx / 32
+    INT bitIdx   = lineIdx % 32
+    g_BookmarkMask[dwordIdx] = g_BookmarkMask[dwordIdx] || (1 << bitIdx)
+    SetFocusA(g_hSciCtrl)
+ENDSUB
+
+SUB ClearAllBookmarks()
+    INT i
+    FOR i = 0 TO 2047
+        g_BookmarkMask[i] = 0
+    NEXT i
+    SetFocusA(g_hSciCtrl)
+ENDSUB
+
+SUB GotoNextBookmark(INT currentLine, INT totalLines)
+    IF totalLines <= 0 THEN RETURN
+    INT searchLine = currentLine + 1
+    INT count = 0
+    
+    WHILE count < totalLines
+        IF searchLine >= totalLines THEN searchLine = 0
+        IF IsLineBookmarked(searchLine) THEN
+            INT charIdx = 0
+            charIdx = SendMessageA(g_hSciCtrl, SCI_POSITIONFROMLINE, searchLine, 0)     
+            SendMessageA(g_hSciCtrl, SCI_SETSEL, charIdx, charIdx)
+            SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+            UpdateGutter()
+            SetFocusA(g_hSciCtrl)
+            RETURN
+        ENDIF
+        searchLine++
+        count++
+    WEND
+ENDSUB
+
+SUB GotoPrevBookmark(INT currentLine, INT totalLines)
+    IF totalLines <= 0 THEN RETURN
+    INT searchLine = currentLine - 1
+    INT count = 0
+    
+    WHILE count < totalLines
+        IF searchLine < 0 THEN searchLine = totalLines - 1
+        IF IsLineBookmarked(searchLine) THEN
+            INT charIdx = 0
+            charIdx = SendMessageA(g_hSciCtrl, SCI_POSITIONFROMLINE, searchLine, 0)            
+            SendMessageA(g_hSciCtrl, SCI_SETSEL, charIdx, charIdx)
+            SendMessageA(g_hSciCtrl, SCI_SCROLLCARET, 0, 0)
+            UpdateGutter()
+            SetFocusA(g_hSciCtrl)
+            RETURN
+        ENDIF
+        searchLine--
+        count++
+    WEND
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Visual-Line-Driven Gutter Rendering
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB UpdateGutter()
+    INT totalH, posW
+    GETCLIENTSIZE W1, posL, posT, posW, totalH
+    IF totalH <= 0 OR posW <= 0 THEN RETURN
+
+    INT posH = totalH
+    IF posH <= 0 THEN RETURN
+
+    Gutter_hDC = GetDC(W1.HWND)
+    IF Gutter_hDC = 0 THEN RETURN
+
+    hdcMem = CreateCompatibleDC(Gutter_hDC)
+    IF hdcMem = 0 THEN 
+        ReleaseDC(W1.HWND, Gutter_hDC)
+        RETURN
+    ENDIF
+
+    BITMAPINFO bmi
+    RtlZeroMemory(&bmi, LEN(bmi))
+    bmi.bmiHeader.biSize        = LEN(bmi.bmiHeader)
+    bmi.bmiHeader.biWidth       = posW
+    bmi.bmiHeader.biHeight      = -posH
+    bmi.bmiHeader.biPlanes      = 1
+    bmi.bmiHeader.biBitCount    = 32
+    bmi.bmiHeader.biCompression = 0
+
+    POINTER pBits = NULL
+    HBITMAP hDib = CreateDIBSection(Gutter_hDC, &bmi, 0, &pBits, NULL, 0)
+    INT oldBmp = SelectObject(hdcMem, hDib)
+
+    INT stride = posW * 4
+
+    WINRECT rcGutter
+    rcGutter.left = 0 : rcGutter.top = 0 : rcGutter.right = posW : rcGutter.bottom = posH
+
+    IF g_hbrGutter <> 0 THEN
+        FillRect(hdcMem, &rcGutter, g_hbrGutter)
+    ELSE
+        BGRA_FillVerticalGradient(pBits, posW, posH, stride, 0x00F4F2F4, 0x00D0CCD0)
+    ENDIF
+
+    IF g_IsResizing = TRUE OR g_hSciCtrl = 0 THEN
+        BitBlt(Gutter_hDC, 0, 0, posW, posH, hdcMem, 0, 0, SRCCOPY)
+        SelectObject(hdcMem, oldBmp)
+        DeleteObject(hDib)
+        DeleteDC(hdcMem)
+        ReleaseDC(W1.HWND, Gutter_hDC)
+        RETURN
+    ENDIF
+
+    INT visLineHeight = SendMessageA(g_hSciCtrl, SCI_TEXTHEIGHT, 0, 0)
+    IF visLineHeight <= 0 THEN visLineHeight = 15
+
+    INT firstVisLine = SendMessageA(g_hSciCtrl, SCI_GETFIRSTVISIBLELINE, 0, 0)
+    INT linesOnScreen = SendMessageA(g_hSciCtrl, SCI_LINESONSCREEN, 0, 0)
+
+    INT selStart = SendMessageA(g_hSciCtrl, SCI_GETCURRENTPOS, 0, 0)
+    INT currentCaretLine = SendMessageA(g_hSciCtrl, SCI_LINEFROMPOSITION, selStart, 0)
+
+    INT hFontPixels = -MulDiv(g_App.fontSize, GetDeviceCaps(Gutter_hDC, 90), 72)
+    IF hFontPixels = 0 THEN hFontPixels = -13
+
+    STRING targetFontName$ = g_App.fontName
+    IF targetFontName$ = "" THEN targetFontName$ = "Consolas"
+
+    INT hGutterFont = CreateFontA(hFontPixels, 0, 0, 0, g_App.fontWeight, (g_App.fontFlags & 2), (g_App.fontFlags & 4), 0, 0, 0, 0, 0, 0, targetFontName$)
+    INT oldFont = SelectObject(hdcMem, hGutterFont)
+
+    SetBkMode(hdcMem, TRANSPARENT)
+    SetTextAlign(hdcMem, TA_TOP | TA_RIGHT)
+
+    INT numRightBoundary = posW - 8
+    IF numRightBoundary < 3 THEN numRightBoundary = 3
+
+    HPEN hPolePen         = CreatePen(PS_SOLID, 1, RGB(70, 70, 80))
+    HPEN hFlagBorderPen   = CreatePen(PS_SOLID, 1, RGB(0, 100, 40))
+    HBRUSH hFlagFillBrush = CreateSolidBrush(RGB(0, 220, 100))
+
+    POINT flagPts[3]
+
+    INT yPos = 0
+    INT visIndex = 0
+    INT currentVisLine = 0
+    INT docLine = -1
+    INT prevDocLine = -1
+    INT totalDocLines = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0)
+
+    FOR visIndex = 0 TO linesOnScreen
+        currentVisLine = firstVisLine + visIndex
+        docLine = SendMessageA(g_hSciCtrl, SCI_DOCLINEFROMVISIBLE, currentVisLine, 0)
+
+        IF docLine < 0 OR docLine >= totalDocLines THEN BREAK
+
+        IF docLine = currentCaretLine THEN
+            POINTER pHighlightRow = NULL
+            INT rowIdx
+            FOR rowIdx = 0 TO visLineHeight - 1
+                IF (yPos + rowIdx) < posH THEN
+                    pHighlightRow = pBits + ((yPos + rowIdx) * stride)
+                    SSE2_BlendHighlightRow(pHighlightRow, posW - 2, 0xFFFFFF00)
+                ENDIF
+            NEXT rowIdx
+        ENDIF
+
+        IF docLine <> prevDocLine THEN
+            temp$ = LTrim$(Str$(docLine + 1))
+
+            IF IsLineBookmarked(docLine) THEN
+                INT poleX  = 4
+                INT topY   = yPos + 1
+                INT botY   = yPos + visLineHeight - 2
+                INT flagH  = (visLineHeight / 2) + 1
+                INT flagW  = 6
+
+                INT hOldLoopPen = SelectObject(hdcMem, hPolePen)
+                MoveToEx(hdcMem, poleX, topY, NULL)
+                _LineTo(hdcMem, poleX, botY + 1)
+
+                SelectObject(hdcMem, hFlagBorderPen)
+                INT hOldLoopBrush = SelectObject(hdcMem, hFlagFillBrush)
+
+                flagPts[0].x = poleX + 1     : flagPts[0].y = topY
+                flagPts[1].x = poleX + flagW : flagPts[1].y = topY + (flagH / 2)
+                flagPts[2].x = poleX + 1     : flagPts[2].y = topY + flagH
+
+                Polygon(hdcMem, &flagPts[0], 3)
+
+                SelectObject(hdcMem, hOldLoopBrush)
+                SelectObject(hdcMem, hOldLoopPen)
+            ENDIF
+
+            IF docLine = currentCaretLine THEN
+                SetTextColor(hdcMem, RGB(0, 128, 0))
+            ELSE
+                SetTextColor(hdcMem, RGB(90, 90, 100))
+            ENDIF
+
+            TextOut(hdcMem, numRightBoundary, yPos, temp$, Len(temp$))
+            prevDocLine = docLine
+        ENDIF
+
+        yPos += visLineHeight
+        IF yPos >= posH THEN BREAK
+    NEXT visIndex
+
+    DeleteObject(hPolePen)
+    DeleteObject(hFlagBorderPen)
+    DeleteObject(hFlagFillBrush)
+
+    BitBlt(Gutter_hDC, 0, 0, posW, posH, hdcMem, 0, 0, SRCCOPY)
+
+    SelectObject(hdcMem, oldFont)
+    DeleteObject(hGutterFont)
+
+    SelectObject(hdcMem, oldBmp)
+    DeleteObject(hDib)
+
+    DeleteDC(hdcMem)
+    ReleaseDC(W1.HWND, Gutter_hDC)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': DrawRuler
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DrawRuler()
+    GETCLIENTSIZE W0, posL, posT, posW, posH
+    IF posH <= 0 OR posW <= 0 THEN RETURN
+
+    Ruler_hDC = GetDC(W0.HWND)
+    IF Ruler_hDC = 0 THEN RETURN
+
+    rhdcMem = CreateCompatibleDC(Ruler_hDC)
+    IF rhdcMem = 0 THEN
+        ReleaseDC(W0.HWND, Ruler_hDC)
+        RETURN
+    ENDIF
+
+    BITMAPINFO bmi
+    RtlZeroMemory(&bmi, LEN(bmi))
+    bmi.bmiHeader.biSize        = LEN(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth       = posW
+    bmi.bmiHeader.biHeight      = -posH
+    bmi.bmiHeader.biPlanes      = 1
+    bmi.bmiHeader.biBitCount    = 32
+    bmi.bmiHeader.biCompression = 0
+
+    POINTER pBits = NULL
+    rhbmMem = CreateDIBSection(Ruler_hDC, &bmi, 0, &pBits, 0, 0)
+    
+    IF rhbmMem = 0 THEN
+        DeleteDC(rhdcMem)
+        ReleaseDC(W0.HWND, Ruler_hDC)
+        RETURN
+    ENDIF
+
+    roldBmp = SelectObject(rhdcMem, rhbmMem)
+
+    TRIVERTEX vert[2]
+    GRADIENT_RECT gRect
+    vert[0].x = 0    : vert[0].y = 0    : vert[0].Red = 0xF400 : vert[0].Green = 0xF200 : vert[0].Blue = 0xF400 : vert[0].Alpha = 0
+    vert[1].x = posW : vert[1].y = posH : vert[1].Red = 0xD000 : vert[1].Green = 0xCC00 : vert[1].Blue = 0xD000 : vert[1].Alpha = 0
+    gRect.UpperLeft = 0 : gRect.LowerRight = 1
+    GradientFill(rhdcMem, &vert[0], 2, &gRect, 1, GRADIENT_FILL_RECT_V)
+
+    INT oldPen = SelectObject(rhdcMem, g_hRulerSepPen)
+    MoveToEx(rhdcMem, 0, posH - 1, NULL)
+    _LineTo(rhdcMem, posW, posH - 1)
+
+    IF g_IsResizing = TRUE OR g_hSciCtrl = 0 THEN
+        BitBlt(Ruler_hDC, 0, 0, posW, posH, rhdcMem, 0, 0, SRCCOPY)
+        SelectObject(rhdcMem, oldPen)
+        SelectObject(rhdcMem, roldBmp)
+        DeleteObject(rhbmMem)
+        DeleteDC(rhdcMem)
+        ReleaseDC(W0.HWND, Ruler_hDC)
+        RETURN
+    ENDIF
+
+    IF g_hRulerFont = 0 THEN
+        INT fontHeight = -MulDiv(g_App.fontSize, GetDeviceCaps(Ruler_hDC, 90), 72)
+        g_hRulerFont = CreateFontA(fontHeight, 0, 0, 0, g_App.fontWeight, 0, 0, 0, _
+                                   0, 0, 0, 0, 0, g_App.fontName)
+    ENDIF
+
+    roldFont = SelectObject(rhdcMem, g_hRulerFont)
+
+    INT charW = 8
+    SIZE charSize
+    IF GetTextExtentPoint32A(rhdcMem, "0", 1, &charSize) <> 0 THEN
+        charW = charSize.cx
+    ENDIF
+    IF charW <= 0 THEN charW = 8
+
+    INT leftMargin = SendMessageA(g_hSciCtrl, SCI_GETMARGINLEFT, 0, 0)
+    IF leftMargin < 12 THEN leftMargin = 12
+
+    INT totalNeededChars = ((posW + HSCROLLPOS) / charW) + 20
+    IF totalNeededChars < 100 THEN totalNeededChars = 100
+
+    STRING item1 = "----+----"
+    STRING itemDigit
+    ISTRING Ruler$[4096]
+    
+    Ruler$ = "0"
+    INT blockCount = 1
+
+    WHILE LEN(Ruler$) < totalNeededChars
+        itemDigit = LTRIM$(STR$(blockCount % 10))
+        Ruler$ = Ruler$ + item1 + itemDigit
+        blockCount++
+    WEND
+
+    IF pBits <> NULL THEN
+        INT currentPos    = SendMessageA(g_hSciCtrl, 2008, 0, 0)
+        INT currentColumn = SendMessageA(g_hSciCtrl, 2129, currentPos, 0)
+        INT tickerX       = gutterW + leftMargin + (currentColumn * charW) - HSCROLLPOS
+
+        IF tickerX >= gutterW AND tickerX < posW THEN
+            DWORD yellowHighlight = 0x00FFFF30
+            INT pitchBytes        = posW * 4
+            INT y                 = 0
+
+            FOR y = 0 TO posH - 1
+                POINTER pRowBits = pBits + (y * pitchBytes) + (tickerX * 4)
+                SSE2_BlendHighlightRow(pRowBits, charW, yellowHighlight)
+            NEXT y
+        ENDIF
+    ENDIF
+
+    SetTextColor(rhdcMem, RGB(70, 70, 80))
+    SetBkMode(rhdcMem, TRANSPARENT)
+
+    INT textX = gutterW + leftMargin - HSCROLLPOS
+    TextOut(rhdcMem, textX, 0, Ruler$, LEN(Ruler$))
+
+    WINRECT rcMicroHeader
+    rcMicroHeader.left = 0 : rcMicroHeader.top = 0 : rcMicroHeader.right = gutterW : rcMicroHeader.bottom = posH
+
+    IF g_hbrGutter <> 0 THEN
+        FillRect(rhdcMem, &rcMicroHeader, g_hbrGutter)
+    ELSE
+        TRIVERTEX mhVert[2]
+        GRADIENT_RECT mhRect
+        mhVert[0].x = 0            : mhVert[0].y = 0    : mhVert[0].Red = 0xF400 : mhVert[0].Green = 0xF200 : mhVert[0].Blue = 0xF400 : mhVert[0].Alpha = 0
+        mhVert[1].x = gutterW      : mhVert[1].y = posH : mhVert[1].Red = 0xD000 : mhVert[1].Green = 0xCC00 : mhVert[1].Blue = 0xD000 : mhVert[1].Alpha = 0
+        mhRect.UpperLeft = 0 : mhRect.LowerRight = 1
+        GradientFill(rhdcMem, &mhVert[0], 2, &mhRect, 1, GRADIENT_FILL_RECT_V)
+    ENDIF
+
+    SelectObject(rhdcMem, g_hRulerSepPen)
+    MoveToEx(rhdcMem, gutterW - 1, 0, NULL)
+    _LineTo(rhdcMem, gutterW - 1, posH)
+
+    POINT flagPts[3]
+    SelectObject(rhdcMem, g_hRulerPolePen)
+    MoveToEx(rhdcMem, 6, 3, NULL)
+    _LineTo(rhdcMem, 6, 15)
+
+    SelectObject(rhdcMem, g_hRulerFlagPen)
+    INT hOldBrush = SelectObject(rhdcMem, g_hRulerFlagBrush)
+    flagPts[0].x = 7  : flagPts[0].y = 3
+    flagPts[1].x = 13 : flagPts[1].y = 6
+    flagPts[2].x = 7  : flagPts[2].y = 9
+    Polygon(rhdcMem, &flagPts[0], 3)
+    SelectObject(rhdcMem, hOldBrush)
+
+    SelectObject(rhdcMem, g_hRulerArrowPen)
+    MoveToEx(rhdcMem, 23, 4, NULL) : _LineTo(rhdcMem, 19, 8)
+    MoveToEx(rhdcMem, 23, 4, NULL) : _LineTo(rhdcMem, 27, 8)
+    MoveToEx(rhdcMem, 23, 4, NULL) : _LineTo(rhdcMem, 23, 13)
+
+    MoveToEx(rhdcMem, 36, 13, NULL) : _LineTo(rhdcMem, 32, 9)
+    MoveToEx(rhdcMem, 36, 13, NULL) : _LineTo(rhdcMem, 40, 9)
+    MoveToEx(rhdcMem, 36, 4, NULL)  : _LineTo(rhdcMem, 36, 13)
+
+    SelectObject(rhdcMem, g_hRulerEraserPen)
+    SelectObject(rhdcMem, g_hRulerEraserBrush)
+
+    POINT eraserPts[4]
+    eraserPts[0].x = 46 : eraserPts[0].y = 11
+    eraserPts[1].x = 50 : eraserPts[1].y = 5
+    eraserPts[2].x = 55 : eraserPts[2].y = 8
+    eraserPts[3].x = 51 : eraserPts[3].y = 14
+    Polygon(rhdcMem, &eraserPts[0], 4)
+
+    BitBlt(Ruler_hDC, 0, 0, posW, posH, rhdcMem, 0, 0, SRCCOPY)
+
+    SelectObject(rhdcMem, roldFont)
+    SelectObject(rhdcMem, oldPen)
+    SelectObject(rhdcMem, roldBmp)
+
+    DeleteObject(rhbmMem)
+    DeleteDC(rhdcMem)
+    ReleaseDC(W0.HWND, Ruler_hDC)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Status & Auxiliary Utilities
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB UpdateStatusBar()
+    IF g_hSciCtrl = 0 THEN RETURN
+
+    DWORD selStart = SendMessageA(g_hSciCtrl, SCI_GETCURRENTPOS, 0, 0)
+    INT caretPos = selStart
+    INT currentLine = SendMessageA(g_hSciCtrl, SCI_LINEFROMPOSITION, caretPos, 0)
+    INT lineStartChar = SendMessageA(g_hSciCtrl, SCI_POSITIONFROMLINE, currentLine, 0)
+    INT totalLines = SendMessageA(g_hSciCtrl, SCI_GETLINECOUNT, 0, 0)
+
+    INT currentCol = caretPos - lineStartChar + 1
+    IF currentCol < 1 THEN currentCol = 1
+
+    ISTRING posBuf[64]
+    wsprintfA(&posBuf, "Ln:%d/%d   Col:%d", currentLine + 1, totalLines, currentCol)
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 0, posBuf
+
+    INT currentByteSize = SendMessageA(g_hSciCtrl, SCI_GETTEXTLENGTH, 0, 0)
+    ISTRING sizeStr[32]
+    GetReadableFileSize(currentByteSize, &sizeStr)
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 1, sizeStr
+
+    STRING encStr
+    IF g_App.isANSI = 1 THEN encStr = "ANSI" ELSE encStr = "UTF-8"
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 2, encStr
+
+    ISTRING eolBuf[16]
+    IF LEN(g_App.eolMode) > 0 THEN
+        lstrcpynA(&eolBuf, g_App.eolMode, 15)
+    ELSE
+        lstrcpynA(&eolBuf, "CRLF", 15)
+    ENDIF
+    CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 3, eolBuf
+
+    IF (GetKeyStateA(0x14) & 1) THEN
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 4, "CAP"
+    ELSE
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 4, ""
+    ENDIF
+
+    IF (GetKeyStateA(0x90) & 1) THEN
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 5, "NUM"
+    ELSE
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 5, ""
+    ENDIF
+
+    IF g_App.isOverwrite = 1 THEN
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 6, "OVR"
+    ELSE
+        CONTROLCMD WIN, STATUS_1, @SWSETPANETEXT, 6, "INS"
+    ENDIF
+
+    INT canUndo = SendMessageA(g_hSciCtrl, SCI_CANUNDO, 0, 0)
+    INT canRedo = SendMessageA(g_hSciCtrl, SCI_CANREDO, 0, 0)
+
+    ControlCMD WIN, 2000, @TBENABLEBUTTON, CMD_UNDO, canUndo
+    ControlCMD WIN, 2000, @TBENABLEBUTTON, CMD_REDO, canRedo
+
+ENDSUB
+
+SUB UpdateTitleBar()
+    STRING targetCaption$ = ""
+
+    IF g_CurrentLoadedPath <> "" THEN
+        IF g_IsDirty THEN
+            targetCaption$ = "Tpad - [" + g_CurrentLoadedPath + " *]"
+        ELSE
+            targetCaption$ = "Tpad - [" + g_CurrentLoadedPath + "]"
+        ENDIF
+    ELSE
+        IF g_IsDirty THEN
+            targetCaption$ = "Tpad - [No Name *]"
+        ELSE
+            targetCaption$ = "Tpad - [No Name]"
+        ENDIF
+    ENDIF
+
+    ControlCMD WIN, 2000, @TBENABLEBUTTON, CMD_SAVEAS, g_IsDirty
+
+    IF targetCaption$ <> g_CachedCaption$ THEN
+        g_CachedCaption$ = targetCaption$
+        SETCAPTION WIN, targetCaption$
+    ENDIF
+ENDSUB
+
+SUB Trace(STRING msg$)
+    OutputDebugStringA("[Tpad Trace] " + msg$ + "\n")
+EndSub
+
+SUB mruArray()
+    INT b = 0, i = 0, j = 0
+    STRING target$ = newName
+    If target$ = "" OR target$ = "Empty" THEN RETURN
+
+    For i = 0 TO 4
+        If g_App.mru[i] = target$ Then
+            For j = i TO 1 STEP -1
+                g_App.mru[j] = g_App.mru[j - 1]
+            Next j
+            g_App.mru[0] = target$
+            b = 1
+            BREAK
+        EndIf
+    Next i
+
+    If b = 0 Then
+        For i = 4 TO 1 STEP -1
+            g_App.mru[i] = g_App.mru[i - 1]
+        Next i
+        g_App.mru[0] = target$
+    EndIf
+EndSub
+
+SUB ClearMRUHistory()
+    INT i
+    FOR i = 0 TO 4
+        g_App.mru[i] = "Empty"
+        g_App.mruFlags[i] = @MENUDISABLE
+    NEXT i
+
+    INIWrite()
+ENDSUB
+
+SUB RemoveMRUItem(INT index)
+    IF index < 0 OR index > 4 THEN RETURN
+
+    INT i
+    FOR i = index TO 3
+        g_App.mru[i] = g_App.mru[i + 1]
+    NEXT i
+
+    g_App.mru[4] = "Empty"
+
+    INIWrite()
+ENDSUB
+
+SUB INIRead()
+    STRING zbuffer
+    INT nret, nbuffer, i
+    iniloc = GETSTARTPATH + "Tpad.ini"
+    
+    For i = 0 TO 4
+        zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+        key = "MRU" + LTRIM$(STR$(i))
+        nret = GetPrivateProfileStringA("Files", key, "Empty", zbuffer, nBuffer, iniloc)
+        zbuffer = LEFT$(zbuffer, nret)
+        If zbuffer <> "" THEN g_App.mru[i] = zbuffer
+    Next i
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Font", "Name", "Consolas", zbuffer, nBuffer, iniloc)
+    g_App.fontName = LEFT$(zbuffer, nret)
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Font", "Size", "10", zbuffer, nBuffer, iniloc)
+    g_App.fontSize = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Font", "Weight", "0", zbuffer, nBuffer, iniloc)
+    g_App.fontWeight = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Font", "Flags", "0", zbuffer, nBuffer, iniloc)
+    g_App.fontFlags = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Settings", "OnTop", "0", zbuffer, nBuffer, iniloc)
+    g_App.onTop = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Settings", "WordWrap", "0", zbuffer, nBuffer, iniloc)
+    g_App.wordWrap = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Settings", "ThemeID", "0", zbuffer, nBuffer, iniloc)
+    g_App.themeID = VAL(LEFT$(zbuffer, nret))
+
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Window", "Left", "-9999", zbuffer, nBuffer, iniloc)
+    g_App.left = VAL(LEFT$(zbuffer, nret))
+    
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Window", "Top", "-9999", zbuffer, nBuffer, iniloc)
+    g_App.top = VAL(LEFT$(zbuffer, nret))
+    
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Window", "Width", "640", zbuffer, nBuffer, iniloc)
+    g_App.width = VAL(LEFT$(zbuffer, nret))
+    
+    zbuffer = SPACE$(250) : nBuffer = LEN(zbuffer)
+    nret = GetPrivateProfileStringA("Window", "Height", "480", zbuffer, nBuffer, iniloc)
+    g_App.height = VAL(LEFT$(zbuffer, nret))
+
+    FlushINI()
+ENDSUB
+
+SUB INIWrite()
+    INT i
+    iniloc = GETSTARTPATH + "Tpad.ini"
+    
+    For i = 0 TO 4
+        key = "MRU" + LTRIM$(STR$(i))
+        WritePrivateProfileString("Files", key, g_App.mru[i], iniloc)
+    Next i
+
+    WritePrivateProfileString("Font", "Name", g_App.fontName, iniloc)
+    WritePrivateProfileString("Font", "Size", STR$(g_App.fontSize), iniloc)
+    WritePrivateProfileString("Font", "Weight", STR$(g_App.fontWeight), iniloc)
+    WritePrivateProfileString("Font", "Flags", STR$(g_App.fontFlags), iniloc)
+
+    WritePrivateProfileString("Settings", "OnTop", STR$(g_App.onTop), iniloc)
+    WritePrivateProfileString("Settings", "WordWrap", STR$(g_App.wordWrap), iniloc)
+    WritePrivateProfileStringA("Settings", "ThemeID", STR$(g_App.themeID), iniloc)
+
+    If IsIconic(WIN.hwnd) = 0
+        GETSIZE WIN, g_App.left, g_App.top, g_App.width, g_App.height
+        WritePrivateProfileString("Window", "Left", STR$(g_App.left), iniloc)
+        WritePrivateProfileString("Window", "Top", STR$(g_App.top), iniloc)
+        WritePrivateProfileString("Window", "Width", STR$(g_App.width), iniloc)
+        WritePrivateProfileString("Window", "Height", STR$(g_App.height), iniloc)
+    EndIf
+
+    FlushINI()
+ENDSUB
+
+SUB FlushINI()
+    WritePrivateProfileStringA(NULL, NULL, NULL, iniloc)
+ENDSUB
+
+SUB RemoveQuotes(), STRING
+    While LEFT$(Cline, 1) = CHR$(34)
+        Cline = RIGHT$(Cline, LEN(Cline) - 1)
+    Wend
+    While RIGHT$(Cline, 1) = CHR$(34)
+        Cline = LEFT$(Cline, LEN(Cline) - 1)
+    Wend
+    RETURN Cline
+EndSub
+
+SUB InitAbout()
+    ' Dialog size: 280 x 185
+    CREATEDIALOG About, 0, 0, 280, 185, @NOCAPTION, WIN, "About Tpad", &Abouthandler 
+
+    ' 1. Top GDI Header Banner (SS_BITMAP = 0x000E, Style = 0x5000000E)
+    CONTROL About, @STATIC, "", 0, 0, 280, 65, 0x5000000E, About_Banner
+
+    ' 2. Main Dialog Body Info
+    CONTROL About, @STATIC, "Version : " + APP_VERSION, 20, 72, 240, 18, 0x50000001, 6
+    CONTROL About, @STATIC, "Programming : Yannick Dalissier", 20, 92, 240, 18, 0x50000001, 7
+    CONTROL About, @STATIC, "Written with : IWBasic 2.5", 20, 110, 240, 18, 0x50000001, 8
+
+    ' 3. Bottom GDI Footer Banner (Divider + Embedded Credits, Height: 50px)
+    CONTROL About, @STATIC, "", 0, 135, 280, 50, 0x5000000E, About_Footer
+
+    ' 4. Close Region Button (Positioned at top right)
+    CONTROL About, @RGNBUTTON, "Close", 225, 5, 50, 20, 0x50000000, 1 
+    CONTROL About, @BUTTON, "Escape Close", 0, 0, 0, 0, 0x40080000, About_Close
+ENDSUB
+
+SUB Abouthandler(), INT
+    SELECT @MESSAGE
+
+        CASE @IDINITDIALOG
+            g_AboutOrig = GetWindowLongA(About.hwnd, GWL_WNDPROC)
+            SetWindowLongA(About.hwnd, GWL_WNDPROC, &ColorSubClass)
+
+            ' Generate top banner and attach to static control
+            g_hAboutBannerBmp = CreateAboutBanner(About.hwnd, 280, 65)
+            UINT hBannerCtrl  = GetControlHandle(About, About_Banner)
+            SendMessageA(hBannerCtrl, 0x0172, 0, g_hAboutBannerBmp) ' 0x0172 = STM_SETIMAGE
+
+            ' Generate bottom footer banner (Divider + Credits) and attach
+            g_hAboutFooterBmp = CreateAboutFooter(About.hwnd, 280, 50)
+            UINT hFooterCtrl  = GetControlHandle(About, About_Footer)
+            SendMessageA(hFooterCtrl, 0x0172, 0, g_hAboutFooterBmp)
+
+            ' Setup close button region & bitmaps
+            INT hrgn = RGNFROMBITMAP("brgn_large")
+            hBmp1    = LoadImage("brushed_btn_lg", @IMGBITMAP)
+            SETBUTTONRGN About, 1, hrgn
+            SETHTCOLOR About, 1, RGB(234, 230, 234)
+            SETBUTTONBITMAPS About, 1, hBmp1, 0, 0
+            SETBUTTONBORDER About, 1, 1 
+
+            InjectUIFont(About.hwnd) 
+            CENTERWINDOW About
+
+        CASE @IDERASEBACKGROUND
+            FOR cid = 6 TO 8
+                InvalidateRect(About.hWnd, GetRect(About, cid), TRUE)
+            NEXT cid
+            InvalidateRect(About.hWnd, NULL, TRUE)
+
+        CASE @IDCLOSEWINDOW 
+            ' Clean up GDI bitmap handles to prevent memory leaks
+            IF g_hAboutBannerBmp <> 0 THEN
+                DeleteObject(g_hAboutBannerBmp)
+                g_hAboutBannerBmp = 0
+            ENDIF
+            IF g_hAboutFooterBmp <> 0 THEN
+                DeleteObject(g_hAboutFooterBmp)
+                g_hAboutFooterBmp = 0
+            ENDIF
+            CLOSEDIALOG About, @IDOK 
+
+        CASE @IDCONTROL 
+            IF @ControlID = 1 OR @ControlID = About_Close THEN
+                SendMessage About, WM_CLOSE, 0, 0
+            ENDIF
+
+        CASE @IDLBUTTONDN
+            DragWindow(About)
+
+    ENDSELECT 
+    RETURN 0
+ENDSUB 
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Composites Top Header Banner into an HBITMAP handle
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB CreateAboutBanner(UINT hwndDlg, INT width, INT height), UINT
+    UINT hdcWin  = GetDC(hwndDlg)
+    UINT hdcMem  = CreateCompatibleDC(hdcWin)
+    UINT hBmp    = CreateCompatibleBitmap(hdcWin, width, height)
+    UINT hOldBmp = SelectObject(hdcMem, hBmp)
+
+    WINRECT rc
+    rc.left = 0 : rc.top = 0 : rc.right = width : rc.bottom = height
+
+    ' 1. Background Fill using Brushed Metal Pattern Brush
+    IF g_WndMenu.m_hbrBrushed <> 0 THEN
+        FillRect(hdcMem, &rc, g_WndMenu.m_hbrBrushed)
+    ELSE
+        UINT hbrBg = CreateSolidBrush(RGB(212, 215, 220))
+        FillRect(hdcMem, &rc, hbrBg)
+        DeleteObject(hbrBg)
+    ENDIF
+
+    ' 2. Sunken 3D Icon Pocket
+    WINRECT rcIconBox
+    rcIconBox.left = 8 : rcIconBox.top = 4 : rcIconBox.right = 50 : rcIconBox.bottom = 46
+    DrawEdge(hdcMem, &rcIconBox, EDGE_SUNKEN, BF_RECT)
+
+    IF hIcon[1] <> 0 THEN
+        DrawIconEx(hdcMem, 13, 9, hIcon[1], 32, 32, 0, 0, 3)
+    ENDIF
+
+    SetBkMode(hdcMem, 1) ' TRANSPARENT
+
+    ' 3. Embossed Title Text with Soft Glow Aura ("TPad")
+    UINT hFontTitle = CreateFontA(-22, 0, 0, 0, 700, FALSE, FALSE, FALSE, 0, 0, 0, 5, 0, "Courier New")
+    SelectObject(hdcMem, hFontTitle)
+
+    WINRECT rcTitle
+    rcTitle.left   = 115
+    rcTitle.top    = 5
+    rcTitle.right  = width
+    rcTitle.bottom = 27
+
+    COLORREF colGlow      = RGB(192, 192, 192) ' Soft light gray
+    COLORREF colHighlight = RGB(255, 255, 255) ' Crisp White Raised Edge
+    COLORREF colShadow    = RGB(20, 24, 30)    ' Dark Shadow
+    COLORREF colMain      = RGB(60, 68, 80)    ' Charcoal Embossed Face
+
+    DrawEmbossedGlowText(hdcMem, APP_NAME, &rcTitle, colGlow, colHighlight, colShadow, colMain)
+
+    DeleteObject(hFontTitle)
+
+    ' 4. Engraved Subtitle ("Portable Text Editor")
+    UINT hFontSub = CreateFontA(-12, 0, 0, 0, 600, FALSE, FALSE, FALSE, 0, 0, 0, 5, 0, "Courier")
+    SelectObject(hdcMem, hFontSub)
+
+    WINRECT rcSubHL, rcSubMain
+    rcSubHL.left = 67 : rcSubHL.top = 32 : rcSubHL.right = width + 1 : rcSubHL.bottom = 44
+    SetTextColor(hdcMem, RGB(255, 255, 255))
+    DrawTextA(hdcMem, "Portable Text Editor", -1, &rcSubHL, 0x00000020)
+
+    rcSubMain.left = 66 : rcSubMain.top = 31 : rcSubMain.right = width : rcSubMain.bottom = 43
+    SetTextColor(hdcMem, RGB(65, 72, 82))
+    DrawTextA(hdcMem, "Portable Text Editor", -1, &rcSubMain, 0x00000020)
+
+    DeleteObject(hFontSub)
+
+    ' 5. Deco Block Divider at the bottom of Header Banner
+    DrawDecoBlockDivider(hdcMem, 12, height - 6, width - 24, RGB(110, 116, 128))
+
+    ' Cleanup GDI Objects & Memory DC
+    SelectObject(hdcMem, hOldBmp)
+    DeleteDC(hdcMem)
+    ReleaseDC(hwndDlg, hdcWin)
+
+    RETURN hBmp
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Combines an 8-pass backlit aura with embossed face
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DrawEmbossedGlowText(UINT hdc, STRING text$, POINTER prc, COLORREF glowCol, COLORREF highlightCol, COLORREF shadowCol, COLORREF mainCol)
+    WINRECT rc, rcOff
+    rc = #<WINRECT>prc
+
+    SetBkMode(hdc, 1) ' TRANSPARENT
+
+    ' 1. Layer 1: 8-Pass Backlit Glow Halo (Outer spread at 2px offset)
+    SetTextColor(hdc, glowCol)
+    INT dx, dy
+    FOR dx = -4 TO 4 STEP 4
+        FOR dy = -4 TO 4 STEP 4
+            IF dx <> 0 OR dy <> 0 THEN
+                rcOff.left   = rc.left + dx
+                rcOff.top    = rc.top + dy
+                rcOff.right  = rc.right + dx
+                rcOff.bottom = rc.bottom + dy
+                DrawTextA(hdc, text$, -1, &rcOff, 0x00000020) ' 0x00000020 = DT_SINGLELINE | DT_VCENTER | DT_CENTER
+            ENDIF
+        NEXT dy
+    NEXT dx
+
+    ' 2. Layer 2: Emboss Bottom-Right Drop Shadow (+1px X, +1px Y)
+    rcOff.left = rc.left + 1 : rcOff.top = rc.top + 1
+    rcOff.right = rc.right + 1 : rcOff.bottom = rc.bottom + 1
+    SetTextColor(hdc, shadowCol)
+    DrawTextA(hdc, text$, -1, &rcOff, 0x00000020)
+
+    ' 3. Layer 3: Emboss Top-Left Highlight Edge (-1px X, -1px Y)
+    rcOff.left = rc.left - 1 : rcOff.top = rc.top - 1
+    rcOff.right = rc.right - 1 : rcOff.bottom = rc.bottom - 1
+    SetTextColor(hdc, highlightCol)
+    DrawTextA(hdc, text$, -1, &rcOff, 0x00000020)
+
+    ' 4. Layer 4: Crisp Main Text Face (Base position)
+    SetTextColor(hdc, mainCol)
+    DrawTextA(hdc, text$, -1, prc, 0x00000020)
+ENDSUB
+
+' ============================================================================
+' DrawGlowText - Renders an 8-pass soft optical blur halo around text
+' ============================================================================
+SUB DrawGlowText(UINT hdc, STRING text$, POINTER prc, COLORREF glowCol, COLORREF mainCol)
+    WINRECT rcGlow, rc
+    rc = #<WINRECT>prc   ' Dereference structure pointer safely
+
+    SetTextColor(hdc, glowCol)
+
+    ' 8-Directional 1px offsets simulate a Gaussian edge blur
+    INT dx, dy
+    FOR dx = -2 TO 2
+        FOR dy = -2 TO 2
+            IF dx <> 0 OR dy <> 0 THEN
+                rcGlow.left   = rc.left + dx
+                rcGlow.top    = rc.top + dy
+                rcGlow.right  = rc.right + dx
+                rcGlow.bottom = rc.bottom + dy
+                DrawTextA(hdc, text$, -1, &rcGlow, 0x00000001) ' 0x00000001 = DT_CENTER
+            ENDIF
+        NEXT dy
+    NEXT dx
+
+    ' Sharp main face on top
+    SetTextColor(hdc, mainCol)
+    DrawTextA(hdc, text$, -1, prc, 0x00000001)
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Composites Bottom Footer Banner with Soft Glow Effect
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB CreateAboutFooter(UINT hwndDlg, INT width, INT height), UINT
+    UINT hdcWin  = GetDC(hwndDlg)
+    UINT hdcMem  = CreateCompatibleDC(hdcWin)
+    UINT hBmp    = CreateCompatibleBitmap(hdcWin, width, height)
+    UINT hOldBmp = SelectObject(hdcMem, hBmp)
+
+    WINRECT rc
+    rc.left = 0 : rc.top = 0 : rc.right = width : rc.bottom = height
+
+    ' Background Fill
+    IF g_WndMenu.m_hbrBrushed <> 0 THEN
+        FillRect(hdcMem, &rc, g_WndMenu.m_hbrBrushed)
+    ELSE
+        UINT hbrBg = CreateSolidBrush(RGB(212, 215, 220))
+        FillRect(hdcMem, &rc, hbrBg)
+        DeleteObject(hbrBg)
+    ENDIF
+
+    ' 1. Deco Block Divider at the top edge of footer
+    DrawDecoBlockDivider(hdcMem, 12, 6, width - 24, RGB(110, 116, 128))
+
+    ' 2. Setup Font (Consolas with Courier New fallback)
+    SetBkMode(hdcMem, 1) ' TRANSPARENT
+    UINT hFontCredits = CreateFontA(-11, 0, 0, 0, 600, FALSE, FALSE, FALSE, 0, 0, 0, 5, 0, "Consolas")
+    IF hFontCredits = 0 THEN
+        hFontCredits = CreateFontA(-11, 0, 0, 0, 600, FALSE, FALSE, FALSE, 0, 0, 0, 5, 0, "Courier New")
+    ENDIF
+
+    UINT hOldFont = SelectObject(hdcMem, hFontCredits)
+
+    ' Color Palette for Glow Effect
+    COLORREF colGlow = RGB(192, 192, 192) ' Soft slate/cyan halo
+    COLORREF colText = RGB(112, 112, 112)    ' Sharp Dark Charcoal Face
+
+    WINRECT rcLine1, rcLine2
+
+    ' Credit Line 1
+    rcLine1.left = 0 : rcLine1.top = 16 : rcLine1.right = width : rcLine1.bottom = 30
+    DrawGlowText(hdcMem, "Special thanks to : Fasecero, Brian", &rcLine1, colGlow, colText)
+
+    ' Credit Line 2
+    rcLine2.left = 0 : rcLine2.top = 31 : rcLine2.right = width : rcLine2.bottom = 45
+    DrawGlowText(hdcMem, "and the community at ionicwind forums", &rcLine2, colGlow, colText)
+
+    ' Restores original font and cleans up
+    IF hOldFont <> 0 THEN SelectObject(hdcMem, hOldFont)
+    IF hFontCredits <> 0 THEN DeleteObject(hFontCredits)
+
+    SelectObject(hdcMem, hOldBmp)
+    DeleteDC(hdcMem)
+    ReleaseDC(hwndDlg, hdcWin)
+
+    RETURN hBmp
+ENDSUB
+
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': Stepped geometric square blocks
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+SUB DrawDecoBlockDivider(UINT hdc, INT x, INT y, INT width, COLORREF col)
+    UINT hBrush = CreateSolidBrush(col)
+    WINRECT rc
+
+    INT cx = x + (width / 2)
+    INT cy = y
+
+    ' 1. Central Master Cube (6x6)
+    rc.left = cx - 3 : rc.top = cy - 3 : rc.right = cx + 3 : rc.bottom = cy + 3
+    FillRect(hdc, &rc, hBrush)
+
+    ' 2. Inner Medium Cubes (4x4)
+    rc.left = cx - 12 : rc.top = cy - 2 : rc.right = cx - 8 : rc.bottom = cy + 2
+    FillRect(hdc, &rc, hBrush)
+    rc.left = cx + 8  : rc.top = cy - 2 : rc.right = cx + 12 : rc.bottom = cy + 2
+    FillRect(hdc, &rc, hBrush)
+
+    ' 3. Secondary Medium Cubes (4x4)
+    rc.left = cx - 20 : rc.top = cy - 2 : rc.right = cx - 16 : rc.bottom = cy + 2
+    FillRect(hdc, &rc, hBrush)
+    rc.left = cx + 16 : rc.top = cy - 2 : rc.right = cx + 20 : rc.bottom = cy + 2
+    FillRect(hdc, &rc, hBrush)
+
+    ' 4. Outer Micro Cubes (2x2) extending to edges
+    INT halfW = (width / 2) - 40
+    INT offset
+    FOR offset = 28 TO halfW STEP 7
+        rc.left = cx - offset - 1 : rc.top = cy - 1 : rc.right = cx - offset + 1 : rc.bottom = cy + 1
+        FillRect(hdc, &rc, hBrush)
+
+        rc.left = cx + offset - 1 : rc.top = cy - 1 : rc.right = cx + offset + 1 : rc.bottom = cy + 1
+        FillRect(hdc, &rc, hBrush)
+    NEXT offset
+
+    DeleteObject(hBrush)
+ENDSUB
+
+SUB ColorFindSubClass(hwnd : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+    Select uMsg
+        Case WM_CTLCOLOREDIT
+            STATIC INT hEditBgBrush = 0
+            If hEditBgBrush = 0 THEN hEditBgBrush = CreateSolidBrush(RGB(253, 246, 227))
+            SetTextColor(wParam, RGB(0, 0, 0))
+            SetBkColor(wParam, RGB(253, 246, 227))
+            cID = GetDlgCtrlID(lParam)
+            IF (cID = ctlSearchtext) OR (cID = ctlReplacetext)
+                ReDrawFrame(search_dlg, wParam)
+            ENDIF
+            RETURN hEditBgBrush
+
+        Case WM_CTLCOLORDLG
+            IF hbrBackground <> 0 THEN RETURN hbrBackground
+
+        Case WM_CTLCOLORSTATIC
+            SetBkMode(wParam, @TRANSPARENT)
+            SetTextColor(wParam, RGB(40, 40, 40))
+            SetBrushOrgEx(wParam, 0, 0, NULL)
+            RETURN ghbrBackground
+    EndSelect
+
+    IF g_FindOrig <> 0 THEN
+        RETURN CallWindowProcA(g_FindOrig, hwnd, uMsg, wParam, lParam)
+    ENDIF
+    RETURN 0
+EndSub
+
+SUB ColorSubClass(hwnd : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT 
+    Select uMsg 
+        Case WM_CTLCOLOREDIT 
+            SetTextColor(wParam, RGB(255, 0, 0))
+            SetBkMode(wParam, @TRANSPARENT)
+            RETURN ghbrBackground 
+
+        Case WM_CTLCOLORLISTBOX 
+            SetTextColor(wParam, RGB(0, 255, 0))
+            SetBkMode(wParam, @TRANSPARENT)
+            RETURN ghbrBackground 
+
+        Case WM_CTLCOLORDLG 
+            IF hbrBackground <> 0 THEN RETURN hbrBackground
+
+        Case WM_CTLCOLORSCROLLBAR 
+            SetBkMode(wParam, @TRANSPARENT)
+            RETURN ghbrBackground 
+
+        Case WM_CTLCOLORSTATIC 
+            SetBkMode(wParam, @TRANSPARENT)
+            SetTextColor(wParam, RGB(40, 40, 40))
+            SetBrushOrgEx(wParam, 0, 0, NULL)
+            
+            INT cID = GetDlgCtrlID(lParam)
+            IF cID = 13 THEN
+                IF hbrBackground <> 0 THEN RETURN hbrBackground
+            ENDIF
+            
+            RETURN ghbrBackground
+    EndSelect 
+
+    IF g_AboutOrig <> 0 THEN
+        RETURN CallWindowProcA(g_AboutOrig, hwnd, uMsg, wParam, lParam)
+    ENDIF
+    RETURN 0
+EndSub 
+
+SUB GetRect(Wnd : WINDOW, cID : INT), POINTER
+    DEF dL, dT, dW, dH : INT 
+    DEF pt : POINT 
+    DEF Rec : WINRECT 
+    GETSIZE Wnd, dL, dT, dW, dH, cID 
+    pt.x = dL : pt.y = dT 
+    ScreenToClient(Wnd.hWnd, pt)
+    Rec.left = pt.x 
+    Rec.top = pt.y 
+    Rec.right = pt.x + dW 
+    Rec.bottom = pt.y + dH 
+    RETURN &Rec 
+EndSub 
+
+SUB SaveBufferToFile(STRING filePath$), INT
+    IF g_hSciCtrl = 0 THEN RETURN FALSE
+    
+    INT txtLen = SendMessageA(g_hSciCtrl, SCI_GETTEXTLENGTH, 0, 0)
+    POINTER pUtf8 = SafeAllocHeap(txtLen + 1)
+    SendMessageA(g_hSciCtrl, SCI_GETTEXT, txtLen + 1, pUtf8)
+    
+    POINTER pOutBuf = NULL
+    INT outLen = 0
+
+    IF g_App.isANSI THEN
+        INT wLen = MultiByteToWideChar(65001, 0, pUtf8, txtLen, NULL, 0)
+        POINTER pWide = SafeAllocHeap((wLen + 1) * 2)
+        MultiByteToWideChar(65001, 0, pUtf8, txtLen, pWide, wLen)
+
+        outLen = WideCharToMultiByte(0, 0, pWide, wLen, NULL, 0, NULL, NULL)
+        pOutBuf = SafeAllocHeap(outLen + 1)
+        WideCharToMultiByte(0, 0, pWide, wLen, pOutBuf, outLen, NULL, NULL)
+        
+        SafeFreeHeap(pWide)
+    ELSE
+        pOutBuf = pUtf8
+        outLen = txtLen
+    ENDIF
+
+    HANDLE hFile = CreateFileA(filePath$, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL)
+    IF hFile <> INVALID_HANDLE_VALUE THEN
+        DWORD bytesWritten = 0
+        
+        IF g_App.isANSI = FALSE THEN
+            BYTE bom[3]
+            bom[0] = 0xEF : bom[1] = 0xBB : bom[2] = 0xBF
+            WriteFile(hFile, &bom[0], 3, &bytesWritten, NULL)
+        ENDIF
+        
+        WriteFile(hFile, pOutBuf, outLen, &bytesWritten, NULL)
+        CloseHandle(hFile)
+    ENDIF
+
+    IF g_App.isANSI THEN 
+        SafeFreeHeap(pOutBuf)
+    ENDIF
+    SafeFreeHeap(pUtf8)
+
+    RETURN (hFile <> INVALID_HANDLE_VALUE)
+ENDSUB
+
+SUB BGRA_FillVerticalGradient(POINTER pBits, INT width, INT height, INT stride, DWORD colTop, DWORD colBottom)
+    If pBits = NULL OR width <= 0 OR height <= 0 THEN RETURN
+
+    INT y, x
+    POINTER pRow = NULL
+
+    INT r1 = (colTop >> 16) & 0xFF, g1 = (colTop >> 8) & 0xFF, b1 = colTop & 0xFF
+    INT r2 = (colBottom >> 16) & 0xFF, g2 = (colBottom >> 8) & 0xFF, b2 = colBottom & 0xFF
+
+    INT curR, curG, curB
+    DWORD lineCol
+
+    For y = 0 TO height - 1
+        curR = r1 + (((r2 - r1) * y) / height)
+        curG = g1 + (((g2 - g1) * y) / height)
+        curB = b1 + (((b2 - b1) * y) / height)
+
+        lineCol = (curB << 16) | (curG << 8) | curR
+
+        pRow = pBits + (y * stride)
+        For x = 0 TO width - 1
+            #<DWORD>(pRow + (x * 4)) = lineCol
+        Next x
+    Next y
+EndSub
+
+SUB SetLexerByExtension(STRING filePath$)
+    IF g_hSciCtrl = 0 THEN RETURN
+
+    STRING ext$ = ""
+    INT dotPos = LEN(filePath$)
+    WHILE dotPos > 0
+        IF MID$(filePath$, dotPos, 1) = "." THEN
+            ext$ = LCASE$(RIGHT$(filePath$, LEN(filePath$) - dotPos))
+            BREAK
+        ENDIF
+        dotPos--
+    WEND
+
+    INT activeLexer = SCLEX_NULL
+
+    SELECT ext$
+        CASE "c"
+        CASE& "cpp"
+        CASE& "h"
+        CASE& "hpp"
+        CASE& "rc"
+        CASE& "cxx"
+        CASE& "cc"
+            activeLexer = SCLEX_CPP
+
+        CASE "iwb"
+        CASE& "inc"
+        CASE& "bas"
+        CASE& "iba"
+        CASE& "eba"
+            activeLexer = SCLEX_FREEBASIC
+
+        CASE "asm"
+        CASE& "s"
+        CASE& "inc"
+            activeLexer = SCLEX_ASM
+
+        CASE "py"
+        CASE& "pyw"
+            activeLexer = SCLEX_PYTHON
+
+        DEFAULT
+            activeLexer = SCLEX_NULL
+    ENDSELECT
+
+
+    ' Store active lexer globally
+    g_activeLexer = activeLexer
+
+    ' Set lexer mode in Scintilla
+    SendMessageA(g_hSciCtrl, SCI_SETLEXER, activeLexer, 0)
+
+    ' Reset all character style bytes in the buffer to 0
+    INT docLen = SendMessageA(g_hSciCtrl, 2006, 0, 0) ' SCI_GETLENGTH
+    IF docLen > 0 THEN
+        SendMessageA(g_hSciCtrl, 2005, 0, 0)         ' SCI_CLEARDOCUMENTSTYLE
+        SendMessageA(g_hSciCtrl, 2032, 0, 255)       ' SCI_STARTSTYLING(pos=0, mask=255)
+        SendMessageA(g_hSciCtrl, 2033, docLen, 0)    ' SCI_SETSTYLING(length=docLen, style=0)
+    ENDIF
+
+    ' If Default / Plain Text, update theme and return immediately
+    IF activeLexer = SCLEX_NULL THEN
+        ApplyThemeStyles(g_App.themeID)
+        SyncSyntaxMenuCheck(32)
+        InvalidateRect(g_hSciCtrl, NULL, TRUE)
+        RETURN
+    ENDIF
+
+    SendMessageA(g_hSciCtrl, SCI_SETLEXER, activeLexer, 0)
+
+    ' Dynamically allocate 8KB heap buffers
+    POINTER pKw1 = SafeAllocHeap(8192)
+    POINTER pKw2 = SafeAllocHeap(8192)
+    POINTER pKw3 = SafeAllocHeap(8192)
+
+    IF pKw1 = NULL OR pKw2 = NULL OR pKw3 = NULL THEN
+        IF pKw1 <> NULL THEN SafeFreeHeap(pKw1)
+        IF pKw2 <> NULL THEN SafeFreeHeap(pKw2)
+        IF pKw3 <> NULL THEN SafeFreeHeap(pKw3)
+        RETURN
+    ENDIF
+
+    ' CRITICAL: Null-terminate the first byte of each heap buffer
+    ' so lstrcatA starts concatenating at offset 0 instead of appending to heap garbage
+    #<BYTE>pKw1 = 0
+    #<BYTE>pKw2 = 0
+    #<BYTE>pKw3 = 0
+
+    SELECT activeLexer
+
+        ' ====================================================================
+        ' C / C++ & Win32 Header Lexer
+        ' ====================================================================
+        CASE SCLEX_CPP
+            lstrcatA(pKw1, "auto break case char char16_t char32_t class const constexpr const_cast continue decltype default delete do double ")
+            lstrcatA(pKw1, "dynamic_cast else enum explicit export extern false float for friend goto if inline int long mutable ")
+            lstrcatA(pKw1, "namespace new noexcept nullptr operator private protected public register reinterpret_cast return short ")
+            lstrcatA(pKw1, "signed sizeof static static_assert static_cast struct switch template this thread_local throw true try ")
+            lstrcatA(pKw1, "typedef typeid typename union unsigned using virtual void volatile wchar_t while BOOL BYTE DWORD WORD ")
+            lstrcatA(pKw1, "HANDLE HWND HDC HINSTANCE HMENU POINTER UINT LONG WPARAM LPARAM LRESULT COLORREF WINRECT POINT SIZE ")
+            lstrcatA(pKw1, "HBITMAP HICON HBRUSH HPEN HMODULE")
+
+            lstrcatA(pKw2, "#define #include #ifdef #ifndef #endif #else #elif #line #error #pragma #undef #import")
+
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 0, pKw1)
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 1, pKw2)
+
+        ' ====================================================================
+        ' IWBasic 2.5 / FreeBasic Lexer (ALL IWBasic Keywords & Types)
+        ' ====================================================================
+        CASE SCLEX_FREEBASIC
+            SendMessageA(g_hSciCtrl, SCI_SETPROPERTY, &"freebasic.ignorecase", &"1")
+
+            STRING fbWordChars$ = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_$"
+            SendMessageA(g_hSciCtrl, SCI_SETWORDCHARS, 0, &fbWordChars$)
+
+            ' SET 0 (GOLD): Language Statements, Control Flow, GUI, Types, and Library Functions
+            lstrcatA(pKw1, "sub endsub declare if then else elseif endif for to step next while wend do loop until breakfor ")
+            lstrcatA(pKw1, "select case default endselect return exit break struct type endtype autodefine global const def option dialog ")
+            lstrcatA(pKw1, "import alias extern class endclass new delete datasection enddatasection data read restore openwindow ")
+            lstrcatA(pKw1, "closewindow createdialog showdialog closedialog control setcontroltext getcontroltext setcontrolcolor ")
+            lstrcatA(pKw1, "getclientsize getsize setsize centerwindow enablecontrol showwindow setfocus getfocus addaccelerator ")
+            lstrcatA(pKw1, "setfont setwindowcolor domodal controlcmd getselected setselected addstring deletestring insertstring ")
+            lstrcatA(pKw1, "clearlist textout line rect circle ellipse fillrect setpixel getpixel bitmap rgnbutton button beginmenu window ")
+            lstrcatA(pKw1, "static combobox listbox checkbox radiobutton status progress slider scrollbar tab rich32 groupbox toolbar ")
+            lstrcatA(pKw1, "listview treeview trackbar header updown tooltip animated ctl int string float double uint pointer dword ")
+            lstrcatA(pKw1, "word byte char handle hwnd hdc hinstance hmenu boolean short long qword activatedwindow alreadyrunning ")
+            lstrcatA(pKw1, "appendtextfile argc argv bigstradd bigstrmake bigstrreset browsefolder changefilereadonly setid beginpopup ")
+            lstrcatA(pKw1, "closesplitter concbinitstorage concbloadfonts conclientedge condrawoff condrawon confirmexit loadimage ")
+            lstrcatA(pKw1, "confirmsavechanges conlbaddstrlist conlbinitstorage conlbrightclick conloadimages conlvautosize enum ")
+            lstrcatA(pKw1, "conlvcolumnlistset conlvcolumnset conlvgetcheckstate conlvgettext conlvheaderautosize conlvhittest ")
+            lstrcatA(pKw1, "conlvsetcheckstate conlvsetextendedstyle conlvsetextendedstyleraw connewcontrol conpcsetbarcolor ")
+            lstrcatA(pKw1, "conpcsetbkgcolor conpcsetpos conpcsetrange conprogresscontrol conreset consolidercontrol sendmessage ")
+            lstrcatA(pKw1, "consolidergetpos consolidersetbuddy consolidersetpos consolidersetrange consolidersetthumbsize ")
+            lstrcatA(pKw1, "constatusslidercon constatussliderupdate contabcontrol contabinsert contvcontrol contvdelete wstring ")
+            lstrcatA(pKw1, "contvexpand contvfullinsert contvgetcuritemfulltext contvgetitemfulltext contvgetitemtext end istring ")
+            lstrcatA(pKw1, "contvgetparent contvgetselitem contvhittest contvinsert contvsetcolor contvuseimages modifyexstyle ")
+            lstrcatA(pKw1, "createshortcut createsplitter daysfromstartofyear daysinmonth debugout debugstart redrawframe onexit ")
+            lstrcatA(pKw1, "deletesystrayicon deletewildfile direxists dottedfour dragwindow dynaaddstr dynaaddstrzz gettextsize ")
+            lstrcatA(pKw1, "dynadelete dynagetstr dynagetstrptr dynainsertstr dynaloadfile dynanew dynaremovestr dynarenew endenum ")
+            lstrcatA(pKw1, "dynasavefile dynasortstr dynaswapstr encode64 encodefile64 fileexists getattribstr checkmenuitem ")
+            lstrcatA(pKw1, "getclrbuttonface getclrstatictext getcmclientcoords getcommandtext getdirectorysystem not starttimer ")
+            lstrcatA(pKw1, "getdirectorywindows getdllversion getdriveletters getdrivetypestr getdroppedfiles getdynadirlist ")
+            lstrcatA(pKw1, "getdynafilelist getfilebinaryversion getfileext getfilemodifiediso getfilesfl getfiletimeasiso ")
+            lstrcatA(pKw1, "getfiletimefromiso getibkeywords getibprodir getisonowutc getmyappdatadir getmydesktopdir fontrequest ")
+            lstrcatA(pKw1, "getmydocsdir getmyquicklaunch getmystartmenu getpathfile getsplittercolors getsplittermax enablemenuitem ")
+            lstrcatA(pKw1, "getsplittermin getsplitterpercentage getsplitterpos getsplitterstate getsplitterstyle getsysinfo ")
+            lstrcatA(pKw1, "getsystraymenuxy gettextfromclipboard getwineffectiverect getworkarea intmin intminnz ip2uint ")
+            lstrcatA(pKw1, "isfilereadonly isleapyear keyjustdown lens makefull2dscreen maketempfile matchstart mciclosewave ")
+            lstrcatA(pKw1, "mciopenwave mciplaywave mcisounds mcistopwave memavailable memloadfile menucontrolflip messagewait ")
+            lstrcatA(pKw1, "minimumworkingset modifywindowexstyle modifywindowstyle mousepointerarrow mousepointeroff stoptimer ")
+            lstrcatA(pKw1, "mousepointerwait randomnumstr randomstring readablefilesize regreadstr regwritestr relativepath ")
+            lstrcatA(pKw1, "renew runconsoleapp rundoscmd runnwait savebitmap saveresource sendtoclipboard begininsertmenu ")
+            lstrcatA(pKw1, "setmintrackedwindowsize setprocessspeed setsplittercolors setsplittermax setsplittermin ")
+            lstrcatA(pKw1, "setsplitterpos setsplittershadow setsplitterstate setsplitterstyle settrackedwindowsize sgetdir ")
+            lstrcatA(pKw1, "splittwo strscan subclasswindow systrayicon uint2ip unrgb va_count waitfade warmup winalpha ")
+            lstrcatA(pKw1, "winalphaavailable winalphaoff windowontop xclosefile xinstr xopenfile xread xseek xwrite yesnobox ")
+            lstrcatA(pKw1, "len left left$ right right$ mid mid$ chr chr$ asc val str str$ lcase lcase$ ucase ucase$ space space$ ")
+            lstrcatA(pKw1, "ltrim ltrim$ rtrim rtrim$ getstartpath filerequest prtdialog message box messagebox date date$ time time$ ")
+            lstrcatA(pKw1, "gettickcount null true false endmenu endpopup ")
+
+            ' SET 1 (CYAN): Preprocessor Directives (Bare words + $-prefixed forms)
+            lstrcatA(pKw2, "main $main use $use include $include define $define option $option undef $undef ifdef $ifdef ")
+            lstrcatA(pKw2, "ifndef $ifndef else $else endif $endif _asm _endasm")
+
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 0, pKw1)
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 1, pKw2)
+
+        ' ====================================================================
+        ' x86 / x64 Assembly Lexer
+        ' ====================================================================
+        CASE SCLEX_ASM
+            lstrcatA(pKw1, "mov movzx movsx lea add sub mul div imul idiv inc dec push pop call ret jmp je jne jz jnz jg jge jl jle ja jae jb jbe ")
+            lstrcatA(pKw1, "test cmp xor or and shl shr ror rol rcr rcl nop clc stc cmov cmove cmovne pusha popa pushf popf int ")
+            lstrcatA(pKw1, "syscall sysret bswap xchg pause cpuid rdtsc lock fence mfence sfence lfence movd movq movdqu movdqa ")
+            lstrcatA(pKw1, "pavgb pshufd pxor por pand paddb paddw paddd psubb psubw psubd mulss addss subss divss sqrtss")
+
+            lstrcatA(pKw2, "eax ebx ecx edx esi edi ebp esp rax rbx rcx rdx rsi rdi rbp rsp r8 r9 r10 r11 r12 r13 r14 r15 ax bx cx dx ah al bh ")
+            lstrcatA(pKw2, "bl ch cl dh dl r8w r9w r10w r11w r12w r13w r14w r15w r8b r9b r10b r11b r12b r13b r14b r15b xmm0 xmm1 xmm2 ")
+            lstrcatA(pKw2, "xmm3 xmm4 xmm5 xmm6 xmm7 xmm8 xmm9 xmm10 xmm11 xmm12 xmm13 xmm14 xmm15 ymm0 ymm1 ymm2 ymm3 cs ds es fs gs ss")
+
+            lstrcatA(pKw3, "section segment data text bss dword ptr word ptr byte ptr qword ptr global extern _asm _endasm times db dw dd dq ")
+            lstrcatA(pKw3, "resb resw resd resq align equ struc endstruc macro endm")
+
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 0, pKw1)
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 1, pKw2)
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 2, pKw3)
+
+        ' ====================================================================
+        ' Python 3.x Lexer
+        ' ====================================================================
+        CASE SCLEX_PYTHON
+            lstrcatA(pKw1, "and as assert async await break class continue def del elif else except false finally for from global if import in ")
+            lstrcatA(pKw1, "is lambda none nonlocal not or pass raise return true try while with yield match case")
+
+            lstrcatA(pKw2, "abs all any ascii bin bool bytearray bytes callable chr classmethod compile complex delattr dict dir divmod enumerate ")
+            lstrcatA(pKw2, "eval exec filter float format frozenset getattr globals hasattr hash help hex id input int isinstance ")
+            lstrcatA(pKw2, "issubclass iter len list locals map max memoryview min next object oct open ord pow print property range ")
+            lstrcatA(pKw2, "repr reversed round set setattr slice sorted staticmethod str sum super tuple type vars zip BaseException ")
+            lstrcatA(pKw2, "Exception TypeError ValueError KeyError IndexError AttributeError RuntimeError SystemExit StopIteration")
+
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 0, pKw1)
+            SendMessageA(g_hSciCtrl, SCI_SETKEYWORDS, 1, pKw2)
+    ENDSELECT
+
+    ' Release temporary heap memory
+    SafeFreeHeap(pKw1)
+    SafeFreeHeap(pKw2)
+    SafeFreeHeap(pKw3)
+
+    ApplyThemeStyles(g_App.themeID)
+    SendMessageA(g_hSciCtrl, SCI_COLOURISE, 0, -1)
+
+    SELECT activeLexer
+        CASE SCLEX_ASM
+            SyncSyntaxMenuCheck(33)
+        CASE SCLEX_FREEBASIC
+            SyncSyntaxMenuCheck(34)
+        CASE SCLEX_CPP
+            SyncSyntaxMenuCheck(35)
+        CASE SCLEX_PYTHON
+            SyncSyntaxMenuCheck(36)
+        DEFAULT
+            SyncSyntaxMenuCheck(32)
+    ENDSELECT
+ENDSUB
+
+$option "/p 1"
+
+SUB SSE2_BlendHighlightRow(POINTER pBits, INT width, DWORD highlightColor)
+    If pBits = NULL OR width <= 0 Then
+        RETURN
+    EndIf
+
+    _asm
+        push edi
+        push ebx
+
+        mov edi, [pBits]
+        mov ebx, [width]
+        mov eax, [highlightColor]
+
+        movd xmm0, eax
+        pshufd xmm0, xmm0, 0x00
+
+        mov ecx, ebx
+        shr ecx, 2
+
+    .blend_sse2:
+        movdqu xmm1, [edi]
+        pavgb xmm1, xmm0
+        movdqu [edi], xmm1
+        add edi, 16
+        dec ecx
+        jnz .blend_sse2
+
+    .blend_tail:
+        mov ecx, ebx
+        and ecx, 3
+        jz .blend_done
+
+    .blend_tail_loop:
+        mov [edi], eax
+        add edi, 4
+        dec ecx
+        jnz .blend_tail_loop
+
+    .blend_done:
+        pop ebx
+        pop edi
+    _endasm
+ENDSUB
