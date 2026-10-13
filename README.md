@@ -16,7 +16,7 @@
   * x86 Assembly (`.asm`, `.s`)
   * Python (`.py`, `.pyw`)
 * **Custom Theme Engine:** Built-in theme switching (Warm Gruvbox Dark / Classic Solarized Light) using direct BGR Hex color assignments.
-* **Memory-Mapped I/O:** Handles large files cleanly with optimized threshold loading.
+* **Memory-Mapped I/O:** Handles large files (10Mb) cleanly with optimized threshold loading.
 * **Navigation & Tools:** Bookmark arrays, dynamic ruler display, line search, and custom GDI-skinned UI components.
 
 ---
