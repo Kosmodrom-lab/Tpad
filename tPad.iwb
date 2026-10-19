@@ -1827,7 +1827,7 @@ SUB ApplyThemeStyles(INT themeID)
 ENDSUB
 
 ': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-': Memory-Mapped File Loader with 10MB Guard & Encoding Engine
+': Memory-Mapped File Loader with UTF-8 BOM Masking & 10MB Guard
 ': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 SUB LoadMemoryMappedFile(STRING filePath$), INT
     IF LEN(filePath$) = 0 THEN RETURN FALSE
@@ -1854,8 +1854,10 @@ SUB LoadMemoryMappedFile(STRING filePath$), INT
 
     INT skipBytes = 0
     INT isUtf8 = FALSE
+
+    ' Mask byte dereferences with & 0xFF to prevent signed byte promotion (-17 <> 0xEF)
     IF fileSize >= 3 THEN
-        IF (#<BYTE>(pMem + 0) = 0xEF) AND (#<BYTE>(pMem + 1) = 0xBB) AND (#<BYTE>(pMem + 2) = 0xBF) THEN
+        IF ((#<BYTE>(pMem + 0) & 0xFF) = 0xEF) AND ((#<BYTE>(pMem + 1) & 0xFF) = 0xBB) AND ((#<BYTE>(pMem + 2) & 0xFF) = 0xBF) THEN
             skipBytes = 3
             isUtf8 = TRUE
         ENDIF
@@ -1904,22 +1906,24 @@ SUB LoadMemoryMappedFile(STRING filePath$), INT
     RETURN TRUE
 ENDSUB
 
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+': IsUTF8 - Unsigned Byte Masking DFA Scanner
+': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 SUB IsUTF8(POINTER pMem, DWORD fileSize), INT
     IF pMem = NULL OR fileSize = 0 THEN RETURN FALSE
     
     DWORD i = 0
-    BYTE b = 0
+    INT b = 0
     INT nBytes = 0
-    INT hasNonASCII = FALSE
 
     WHILE i < fileSize
-        b = #<BYTE>(pMem + i)
+        ' Mask with & 0xFF to store as unsigned 0-255 inside 32-bit INT b
+        b = #<BYTE>(pMem + i) & 0xFF
         
-        IF b >= 128 THEN hasNonASCII = TRUE
-
         IF nBytes = 0 THEN
             IF b >= 0x80 THEN
                 IF (b & 0xE0) = 0xC0 THEN
+                    IF b < 0xC2 THEN RETURN FALSE ' Reject overlong sequence
                     nBytes = 1
                 ELSEIF (b & 0xF0) = 0xE0 THEN
                     nBytes = 2
@@ -1936,8 +1940,9 @@ SUB IsUTF8(POINTER pMem, DWORD fileSize), INT
         i++
     WEND
 
+    ' If sequence ended cleanly without truncated multi-byte sequence, file is valid UTF-8
     IF nBytes <> 0 THEN RETURN FALSE
-    RETURN hasNonASCII
+    RETURN TRUE
 ENDSUB
 
 SUB GetReadableFileSize(DWORD fileSize, POINTER pOutBuf)
