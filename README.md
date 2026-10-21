@@ -1,3 +1,8 @@
+![Platform](https://img.shields.io/badge/Platform-Windows%207%20%7C%208%20%7C%2010%20%7C%2011-blue)
+![Language](https://img.shields.io/badge/Language-IWBasic%202.5-orange)
+![License](https://img.shields.io/badge/License-Freeware-green)
+![Status](https://img.shields.io/badge/Status-Portable-brightgreen)
+
 [Tpad.zip](https://github.com/user-attachments/files/33352282/Tpad.zip)
 
 # Tpad
