@@ -7,42 +7,617 @@ $INCLUDE "BrushedMenu.inc"
 
 AutoDefine "Off"
 
+TYPE MEASUREITEMSTRUCT
+    DEF CtlType AS INT
+    DEF CtlID AS INT
+    DEF itemID AS INT
+    DEF itemWidth AS INT
+    DEF itemHeight AS INT
+    DEF itemData AS INT
+ENDTYPE
+
+TYPE DRAWITEMSTRUCT
+    DEF CtlType AS INT
+    DEF CtlID AS INT
+    DEF itemID AS INT
+    DEF itemAction AS INT
+    DEF itemState AS INT
+    DEF hwndItem AS INT
+    DEF hdc AS INT
+    DEF rcItem AS WINRECT
+    DEF itemData AS INT
+ENDTYPE
+
+' Raw Win32 Flag Constants
+CONST MF_BYCOMMAND_VAL  = 0x00000000
+CONST MF_OWNERDRAW_VAL   = 0x00000100
+CONST ODS_SELECTED_VAL   = 0x00000001
+CONST ODS_GRAYED_VAL     = 0x00000002
+CONST ODS_DISABLED_VAL   = 0x00000004
+CONST ODS_CHECKED_VAL    = 0x00000008
+CONST DST_PREFIXTEXT     = 0x00000002
+CONST DST_BITMAP         = 0x00000004
+CONST MFT_SEPARATOR_VAL  = 0x00000800
+CONST BDR_RAISEDINNER    = 0x00000004
+CONST BF_RECT            = 0x0000000F
+
+CONST BM_MAX_ICON_ID = 200
+
+GLOBAL POINTER g_pBrushedMenuInstance
+GLOBAL INT     g_bmHbr
+GLOBAL INT     g_bmFont
+GLOBAL INT     g_bmBmp
+GLOBAL INT     g_bmIconSz
+GLOBAL INT     g_bmTrans
+GLOBAL INT     g_bmIcon[200]
+GLOBAL INT     g_bmCmd[BM_MAX_SLOTS]
+
+
+' TraceBM fast-exit under production mode
+/*
+SUB TraceBM(STRING msg$)
+    IF ' g_Debug = FALSE THEN RETURN
+
+    OutputDebugStringA("[Tpad MenuTrace] " + msg$ + "\n")
+
+    HANDLE hF = CreateFileA(GETSTARTPATH + "menutrace.log", 0x40000000, 1, NULL, 4, 0x80, NULL)
+    IF hF <> -1 THEN
+        STRING line$= msg$ + CHR$(13) + CHR$(10)
+        DWORD written = 0
+        SetFilePointer(hF, 0, NULL, 2)          ' FILE_END
+        WriteFile(hF, &line$, LEN(line$), &written, NULL)
+        CloseHandle(hF)
+    ENDIF
+ENDSUB
+*/
+
 SUB CBrushedMenuBase::CBrushedMenuBase()
-    m_bmp = NULL
     m_hbrBrushed = NULL
+    m_hwnd = 0
+    m_menu = 0
+    m_bmp = NULL
+    g_bmIconSz = 16
     BitmapTransparentColor = RGB(255, 0, 255)
+    g_bmTrans = BitmapTransparentColor
+    m_nextSlot = 1
+    m_baseSlot = 1
+    ' g_Debug = FALSE
+    
+    m_hFont = GetStockObject(17) ' DEFAULT_GUI_FONT = 17
+    g_bmFont = m_hFont
+    
+    INT i = 0
+    FOR i = 0 TO BM_MAX_ICON_ID - 1
+        m_iconMap[i] = -1
+        g_bmIcon[i]  = -1
+    NEXT i
+    FOR i = 0 TO BM_MAX_SLOTS - 1
+        m_itemCmd[i] = -1
+        g_bmCmd[i]   = -1
+    NEXT i
     RETURN
 ENDSUB
 
 SUB CBrushedMenuBase::_CBrushedMenuBase()
-    IF m_bmp <> NULL THEN DeleteObject(m_bmp)
+    IF m_hwnd <> 0 THEN
+        POINTER pOldProc = GetPropA(m_hwnd, "BRUSHED_OLDWNDPROC")
+        IF pOldProc <> NULL THEN
+            SetWindowLongA(m_hwnd, -4, pOldProc)
+            RemovePropA(m_hwnd, "BRUSHED_OLDWNDPROC")
+        ENDIF
+    ENDIF
+    IF g_pBrushedMenuInstance = THIS THEN
+        g_pBrushedMenuInstance = NULL
+    ENDIF
+    RETURN
+ENDSUB
+
+
+GLOBAL UINT g_bmHimlHot
+GLOBAL UINT g_bmHimlDisabled
+
+SUB CBrushedMenuBase::SetImageLists(UINT himlHot, UINT himlDisabled)
+    g_bmHimlHot      = himlHot
+    g_bmHimlDisabled = himlDisabled
+    RETURN
+ENDSUB
+
+GLOBAL INT g_bmBmpHot
+GLOBAL INT g_bmBmpDisabled
+
+SUB CBrushedMenuBase::SetStateBitmaps(HBITMAP bmpHot, HBITMAP bmpDisabled)
+    g_bmBmpHot      = bmpHot
+    g_bmBmpDisabled = bmpDisabled
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SetTextureBrush(HBRUSH hbr)
+    m_hbrBrushed = hbr
+    g_bmHbr      = hbr
     RETURN
 ENDSUB
 
 SUB CBrushedMenuBase::SetImages(HBITMAP bmp, COLORREF clrTransparent), HBITMAP
+    m_bmp                  = bmp
     BitmapTransparentColor = clrTransparent
-    HBITMAP old = m_bmp
-    m_bmp = bmp
-    RETURN old
-ENDSUB
-
-SUB CBrushedMenuBase::SetTextureBrush(HBRUSH hBrush)
-    m_hbrBrushed = hBrush
-    RETURN
+    g_bmBmp                = bmp
+    g_bmTrans              = clrTransparent
+    BITMAP bmI
+    GetObjectA(bmp, LEN(bmI), &bmI)
+    IF bmI.bmHeight > 0 THEN g_bmIconSz = bmI.bmHeight
+    RETURN m_bmp
 ENDSUB
 
 SUB CBrushedMenuBase::SetMenuFont(HFONT hFont)
-    m_hFont = hFont
+    m_hFont  = hFont
+    g_bmFont = hFont
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::AssignBitmapIndex(WORD wID, INT index)
+    IF wID >= 0 AND wID < BM_MAX_ICON_ID THEN
+        m_iconMap[wID] = index
+        g_bmIcon[wID]  = index
+    ENDIF
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SlotText(INT slot), STRING
+    ISTRING tb[96]
+    tb = ""
+    IF slot > 0 AND slot < BM_MAX_SLOTS THEN lstrcpynA(&tb, &m_textPool[slot * 96], 95)
+    STRING r = tb
+    RETURN r
+ENDSUB
+
+SUB CBrushedMenuBase::SkinSubmenus(HMENU hMenu)
+    IF hMenu = 0 THEN RETURN
+    MENUINFO mi
+    RtlZeroMemory(&mi, LEN(mi))
+    mi.cbSize  = LEN(mi)
+    mi.fMask   = 0x00000002 ' MIM_BACKGROUND
+    mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
+
+    INT count = GetMenuItemCount(hMenu)
+    INT i = 0
+    MENUITEMINFO mii
+
+    FOR i = 0 TO count - 1
+        RtlZeroMemory(&mii, LEN(mii))
+        mii.cbSize = LEN(mii)
+        mii.fMask  = 0x00000004 ' MIIM_SUBMENU
+        IF GetMenuItemInfoA(hMenu, i, TRUE, &mii) <> 0 THEN
+            IF mii.hSubMenu <> 0 THEN
+                SetMenuInfo(mii.hSubMenu, &mi)
+                SkinSubmenus(mii.hSubMenu)
+            ENDIF
+        ENDIF
+    NEXT i
+    RETURN
+ENDSUB
+
+SUB CBrushedMenuBase::SkinPopup(HMENU hMenu)
+    IF hMenu = 0 THEN RETURN
+
+    MENUINFO mi
+    RtlZeroMemory(&mi, LEN(mi))
+    mi.cbSize  = LEN(mi)
+    mi.fMask   = 0x00000002 ' MIM_BACKGROUND
+    mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
+    SetMenuInfo(hMenu, &mi)
+
+    SkinSubmenus(hMenu)
+
+    ' Safe recycling of slot pool for dynamic MRU and context popups
+    m_nextSlot = m_baseSlot
+    EnableOwnerDraw(hMenu)
+    RETURN
+ENDSUB
+
+SUB BM_Measure(hwnd : INT, p : INT, slot : INT)
+    IF p = 0 OR g_pBrushedMenuInstance = NULL THEN RETURN
+
+    STRING txt = *<CBrushedMenuBase>g_pBrushedMenuInstance.SlotText(slot)
+    INT textLen = LEN(txt)
+    INT cmd = -1
+    IF slot > 0 AND slot < BM_MAX_SLOTS THEN cmd = g_bmCmd[slot]
+
+    #<INT>(p + 12) = 120
+    #<INT>(p + 16) = GetSystemMetrics(SM_CYMENU) + 2
+
+    IF textLen > 0 THEN
+        HDC hdc = GetDCA(hwnd)
+        WINRECT rcCalc
+        rcCalc.left = 0 : rcCalc.top = 0 : rcCalc.right = 0 : rcCalc.bottom = 0
+        
+        UINT hOldFont = 0
+        IF g_bmFont <> 0 THEN hOldFont = SelectObject(hdc, g_bmFont)
+
+        DrawTextA(hdc, txt, -1, &rcCalc, 0x00000400 | 0x00000020) ' DT_CALCRECT | DT_SINGLELINE
+        
+        IF hOldFont <> 0 THEN SelectObject(hdc, hOldFont)
+
+        ' Tight padding ONLY for top-level menu bar titles (cmd = -1)
+        IF cmd = -1 THEN
+            #<INT>(p + 12) = (rcCalc.right - rcCalc.left) ' Changed from + 8 to 0
+        ELSE
+            ' Submenus (cmd = -2) and command items get full dropdown width offset
+            INT finalWidth = (rcCalc.right - rcCalc.left) + 54 + (g_bmIconSz - 16)
+            IF INSTR(txt, CHR$(9)) > 0 THEN
+                finalWidth = finalWidth + 24
+            ENDIF
+            #<INT>(p + 12) = finalWidth
+        ENDIF
+
+        #<INT>(p + 16) = (rcCalc.bottom - rcCalc.top) + 8
+        IF #<INT>(p + 16) < g_bmIconSz + 4 THEN #<INT>(p + 16) = g_bmIconSz + 4
+        ReleaseDC(hwnd, hdc)
+    ENDIF
+    RETURN
+ENDSUB
+
+SUB BM_Draw(hwnd : INT, p : INT, slot : INT)
+    IF p = 0 OR g_pBrushedMenuInstance = NULL THEN RETURN
+
+    INT itemID     = #<INT>(p + 8)
+    UINT itemState = #<INT>(p + 16)
+    HDC hdcDest    = #<INT>(p + 24)
+
+    INT sz = g_bmIconSz
+    WINRECT rc
+    rc.left   = #<INT>(p + 28)
+    rc.top    = #<INT>(p + 32)
+    rc.right  = #<INT>(p + 36)
+    rc.bottom = #<INT>(p + 40)
+
+    UINT hBrush = 0
+    INT bHighlight = 0
+    INT bmpIdx = -1
+    INT cmd = -1
+    STRING rawText = "", mainCaption = "", shortcutText = ""
+    STRING txt = *<CBrushedMenuBase>g_pBrushedMenuInstance.SlotText(slot)
+
+    IF slot > 0 AND slot < BM_MAX_SLOTS THEN
+        cmd = g_bmCmd[slot]
+        IF cmd >= 0 AND cmd < BM_MAX_ICON_ID THEN
+            bmpIdx = g_bmIcon[cmd]
+        ENDIF
+    ENDIF
+
+    ' Select base brushed background brush
+    IF g_bmHbr <> 0 THEN hBrush = g_bmHbr ELSE hBrush = GetSysColorBrush(COLOR_MENU)
+
+    INT oldBkMode = SetBkMode(hdcDest, 1) ' TRANSPARENT = 1
+    UINT hOldFont = 0
+    IF g_bmFont <> 0 THEN hOldFont = SelectObject(hdcDest, g_bmFont)
+
+    ' Highlight color for SSE2 alpha blend
+    DWORD highlightColor = 0xFFFFFF00
+
+    ' -----------------------------------------------------------------
+    ' A. TOP-LEVEL MENU BAR HEADERS (File, Edit, View, etc. | cmd = -1)
+    ' -----------------------------------------------------------------
+    IF cmd = -1 THEN
+        FillRect(hdcDest, &rc, hBrush)
+
+        IF (itemState & 0x0001) THEN ' ODS_SELECTED
+            BlendHighlightRect(hdcDest, &rc, highlightColor)
+            SetTextColor(hdcDest, GetSysColor(COLOR_MENUTEXT))
+        ELSE
+            SetTextColor(hdcDest, GetSysColor(COLOR_MENUTEXT))
+        ENDIF
+
+    ' -----------------------------------------------------------------
+    ' B. DROPDOWN POPUP MENU ITEMS (cmd >= 0 OR cmd = -2)
+    ' -----------------------------------------------------------------
+    ELSE
+        IF (itemState & 0x0001) THEN ' ODS_SELECTED
+            WINRECT rcHighlight
+            rcHighlight.top    = rc.top
+            rcHighlight.right  = rc.right
+            rcHighlight.bottom = rc.bottom
+
+            IF bmpIdx >= 0 THEN
+                WINRECT rcGutter
+                rcGutter.left   = rc.left
+                rcGutter.top    = rc.top
+                rcGutter.right  = rc.left + sz + 8
+                rcGutter.bottom = rc.bottom
+                FillRect(hdcDest, &rcGutter, hBrush)
+
+                rcHighlight.left = rc.left + sz + 8
+            ELSE
+                rcHighlight.left = rc.left
+            ENDIF
+
+            BlendHighlightRect(hdcDest, &rcHighlight, highlightColor)
+            SetTextColor(hdcDest, GetSysColor(COLOR_MENUTEXT))
+            bHighlight = 1
+        ELSE
+            FillRect(hdcDest, &rc, hBrush)
+            SetTextColor(hdcDest, GetSysColor(COLOR_MENUTEXT))
+        ENDIF
+    ENDIF
+
+    IF (itemState & 0x0006) THEN ' ODS_GRAYED | ODS_DISABLED
+        SetTextColor(hdcDest, GetSysColor(17)) ' COLOR_GRAYTEXT = 17
+    ENDIF
+
+    INT iconY = rc.top + ((rc.bottom - rc.top) - sz) / 2
+    INT iconX = rc.left + 4
+
+    IF bHighlight AND cmd <> -1 AND bmpIdx >= 0 AND (itemState & 0x0006) = 0 THEN
+        WINRECT rcIconBox
+        rcIconBox.left   = iconX - 3
+        rcIconBox.top    = iconY - 2
+        rcIconBox.right  = iconX + sz + 3
+        rcIconBox.bottom = iconY + sz + 4
+
+        ' Clip edges to prevent ghosting into adjacent menu items
+        IF rcIconBox.bottom > rc.bottom THEN rcIconBox.bottom = rc.bottom
+        IF rcIconBox.top < rc.top THEN rcIconBox.top = rc.top
+
+        DrawEdge(hdcDest, &rcIconBox, 0x0004, 0x000F) ' BDR_RAISEDINNER | BF_RECT
+    ENDIF
+
+    ' -----------------------------------------------------------------
+    ' C. RENDER MAPPED BITMAP ICON
+    ' -----------------------------------------------------------------
+    IF bmpIdx >= 0 THEN
+        HDC hdcMem, hdcMask
+        HBITMAP hOldBmp, hMaskBmp, hOldMask
+        COLORREF oldMemBk, oldDestBk, oldDestText
+        INT hSourceBmp = 0
+
+        ' State C1: Disabled / Grayed Item
+        IF (itemState & 0x0006) THEN
+            IF g_bmHimlDisabled <> 0 AND bmpIdx < ImageList_GetImageCount(g_bmHimlDisabled) THEN
+                ImageList_Draw(g_bmHimlDisabled, bmpIdx, hdcDest, iconX, iconY, 1)
+            ELSE
+                IF g_bmBmpDisabled <> 0 THEN hSourceBmp = g_bmBmpDisabled ELSE hSourceBmp = g_bmBmp
+
+                IF hSourceBmp <> 0 THEN
+                    hdcMem  = CreateCompatibleDC(hdcDest)
+                    hdcMask = CreateCompatibleDC(hdcDest)
+                    hOldBmp = SelectObject(hdcMem, hSourceBmp)
+                    hMaskBmp = CreateBitmap(sz, sz, 1, 1, NULL)
+                    hOldMask = SelectObject(hdcMask, hMaskBmp)
+
+                    oldMemBk = SetBkColor(hdcMem, g_bmTrans)
+                    BitBlt(hdcMask, 0, 0, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00CC0020)
+
+                    oldDestBk   = SetBkColor(hdcDest, RGB(255, 255, 255))
+                    oldDestText = SetTextColor(hdcDest, RGB(0, 0, 0))
+
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMask, 0, 0, 0x008800C6)
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+
+                    SetBkColor(hdcDest, oldDestBk)
+                    SetTextColor(hdcDest, oldDestText)
+                    SetBkColor(hdcMem, oldMemBk)
+                    SelectObject(hdcMask, hOldMask)
+                    DeleteObject(hMaskBmp)
+                    DeleteDC(hdcMask)
+                    SelectObject(hdcMem, hOldBmp)
+                    DeleteDC(hdcMem)
+                ENDIF
+            ENDIF
+
+        ' State C2: Highlighted / Selected Item
+        ELSEIF bHighlight THEN
+            IF g_bmHimlHot <> 0 AND bmpIdx < ImageList_GetImageCount(g_bmHimlHot) THEN
+                ImageList_Draw(g_bmHimlHot, bmpIdx, hdcDest, iconX, iconY, 1)
+            ELSE
+                IF g_bmBmpHot <> 0 THEN hSourceBmp = g_bmBmpHot ELSE hSourceBmp = g_bmBmp
+
+                IF hSourceBmp <> 0 THEN
+                    hdcMem  = CreateCompatibleDC(hdcDest)
+                    hdcMask = CreateCompatibleDC(hdcDest)
+                    hOldBmp = SelectObject(hdcMem, hSourceBmp)
+                    hMaskBmp = CreateBitmap(sz, sz, 1, 1, NULL)
+                    hOldMask = SelectObject(hdcMask, hMaskBmp)
+
+                    oldMemBk = SetBkColor(hdcMem, g_bmTrans)
+                    BitBlt(hdcMask, 0, 0, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00CC0020)
+
+                    oldDestBk   = SetBkColor(hdcDest, RGB(255, 255, 255))
+                    oldDestText = SetTextColor(hdcDest, RGB(0, 0, 0))
+
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMask, 0, 0, 0x008800C6)
+                    BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+
+                    SetBkColor(hdcDest, oldDestBk)
+                    SetTextColor(hdcDest, oldDestText)
+                    SetBkColor(hdcMem, oldMemBk)
+                    SelectObject(hdcMask, hOldMask)
+                    DeleteObject(hMaskBmp)
+                    DeleteDC(hdcMask)
+                    SelectObject(hdcMem, hOldBmp)
+                    DeleteDC(hdcMem)
+                ENDIF
+            ENDIF
+
+        ' State C3: Normal Item
+        ELSE
+            IF g_bmBmp <> 0 THEN
+                hdcMem  = CreateCompatibleDC(hdcDest)
+                hdcMask = CreateCompatibleDC(hdcDest)
+                hOldBmp = SelectObject(hdcMem, g_bmBmp)
+                hMaskBmp = CreateBitmap(sz, sz, 1, 1, NULL)
+                hOldMask = SelectObject(hdcMask, hMaskBmp)
+
+                oldMemBk = SetBkColor(hdcMem, g_bmTrans)
+                BitBlt(hdcMask, 0, 0, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00CC0020)
+
+                oldDestBk   = SetBkColor(hdcDest, RGB(255, 255, 255))
+                oldDestText = SetTextColor(hdcDest, RGB(0, 0, 0))
+
+                BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+                BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMask, 0, 0, 0x008800C6)
+                BitBlt(hdcDest, iconX, iconY, sz, sz, hdcMem, bmpIdx * sz, 0, 0x00660046)
+
+                SetBkColor(hdcDest, oldDestBk)
+                SetTextColor(hdcDest, oldDestText)
+                SetBkColor(hdcMem, oldMemBk)
+                SelectObject(hdcMask, hOldMask)
+                DeleteObject(hMaskBmp)
+                DeleteDC(hdcMask)
+                SelectObject(hdcMem, hOldBmp)
+                DeleteDC(hdcMem)
+            ENDIF
+        ENDIF
+
+        IF (itemState & 0x0008) THEN
+            WINRECT rcIconFrame
+            rcIconFrame.left   = iconX - 1
+            rcIconFrame.top    = iconY - 1
+            rcIconFrame.right  = iconX + sz + 1
+            rcIconFrame.bottom = iconY + sz + 1
+            DrawEdge(hdcDest, &rcIconFrame, 0x0002, 0x000F)
+        ENDIF
+
+    ELSEIF (itemState & 0x0008) AND cmd <> -1 THEN
+        WINRECT rcChk
+        rcChk.left   = rc.left + 4
+        rcChk.top    = rc.top + ((rc.bottom - rc.top) - sz) / 2
+        rcChk.right  = rcChk.left + sz
+        rcChk.bottom = rcChk.top + sz
+        DrawFrameControl(hdcDest, &rcChk, 2, 1)
+    ENDIF
+
+    ' -----------------------------------------------------------------
+    ' D. FORMAT AND RENDER TEXT CAPTIONS
+    ' -----------------------------------------------------------------
+    IF LEN(txt) > 0 THEN
+        rawText = txt
+        INT tabPos = INSTR(rawText, CHR$(9))
+        IF tabPos > 0 THEN
+            mainCaption  = LEFT$(rawText, tabPos - 1)
+            shortcutText = MID$(rawText, tabPos + 1)
+        ELSE
+            mainCaption  = rawText
+        ENDIF
+    ENDIF
+
+    IF LEN(mainCaption) > 0 THEN
+        WINRECT rcText
+        rcText.top    = rc.top
+        rcText.bottom = rc.bottom
+
+        IF cmd = -1 THEN
+            rcText.left  = rc.left + 4
+            rcText.right = rc.right - 6
+        ELSE
+            rcText.left  = rc.left + sz + 12
+            rcText.right = rc.right - 10
+        ENDIF
+
+        DrawTextA(hdcDest, mainCaption, -1, &rcText, 0x00000024)
+
+        IF LEN(shortcutText) > 0 THEN
+            DrawTextA(hdcDest, shortcutText, -1, &rcText, 0x00000826)
+        ENDIF
+    ENDIF
+
+    IF hOldFont <> 0 THEN SelectObject(hdcDest, hOldFont)
+    SetBkMode(hdcDest, oldBkMode)
+    RETURN
+ENDSUB
+
+' Subclass Procedure
+SUB CBrushedMenu_SubclassProc(hwnd : INT, uMsg : INT, wParam : INT, lParam : INT), INT
+    INT pOldProc = GetPropA(hwnd, "BRUSHED_OLDWNDPROC")
+
+    SELECT uMsg
+        CASE WM_MEASUREITEM:
+            IF wParam = 0 AND g_pBrushedMenuInstance <> NULL AND lParam <> 0 THEN
+                INT mSlot = #<INT>(lParam + 20)
+                BM_Measure(hwnd, lParam, mSlot)
+                RETURN TRUE
+            ENDIF
+
+        CASE WM_DRAWITEM:
+            IF wParam = 0 AND g_pBrushedMenuInstance <> NULL AND lParam <> 0 THEN
+                INT dSlot = #<INT>(lParam + 44)
+                BM_Draw(hwnd, lParam, dSlot)
+                RETURN TRUE
+            ENDIF
+    ENDSELECT
+
+    IF pOldProc <> 0 THEN
+        RETURN CallWindowProcA(pOldProc, hwnd, uMsg, wParam, lParam)
+    ENDIF
+    RETURN DefWindowProcA(hwnd, uMsg, wParam, lParam)
+ENDSUB
+
+SUB CBrushedMenuBase::EnableOwnerDraw(HMENU menu)
+    IF menu = 0 THEN RETURN
+
+    INT count = GetMenuItemCount(menu)
+    INT a = 0
+    INT slot = 0
+    INT hSub = 0
+    INT oldType = 0
+    INT cmdID = 0
+    INT ok = 0
+    ISTRING buf[96]
+    MENUITEMINFO mii
+
+    FOR a = 0 TO count - 1
+        RtlZeroMemory(&mii, LEN(mii))
+        mii.cbSize = LEN(mii)
+        mii.fMask  = 0x00000100 | 0x00000002 | 0x00000004   ' FTYPE | ID | SUBMENU
+
+        IF GetMenuItemInfoA(menu, a, TRUE, &mii) <> 0 THEN
+            hSub    = mii.hSubMenu
+            oldType = mii.fType
+            cmdID   = mii.wID
+
+            IF (oldType & 0x00000800) = 0 AND (oldType & 0x00000100) = 0 AND m_nextSlot < BM_MAX_SLOTS THEN
+                buf = ""
+                GetMenuStringA(menu, a, &buf, 95, 0x00000400)   ' MF_BYPOSITION
+
+                slot = m_nextSlot
+                m_nextSlot = m_nextSlot + 1
+                lstrcpynA(&m_textPool[slot * 96], &buf, 95)
+                
+                IF hSub = 0 THEN 
+                    m_itemCmd[slot] = cmdID 
+                    g_bmCmd[slot]   = cmdID
+                ELSE 
+                    ' Top-level menu bar headers retain -1, nested submenus take -2
+                    IF menu = m_menu THEN
+                        m_itemCmd[slot] = -1
+                        g_bmCmd[slot]   = -1
+                    ELSE
+                        m_itemCmd[slot] = -2
+                        g_bmCmd[slot]   = -2
+                    ENDIF
+                ENDIF
+
+                RtlZeroMemory(&mii, LEN(mii))
+                mii.cbSize     = LEN(mii)
+                mii.fMask      = 0x00000100 | 0x00000020      ' FTYPE | DATA
+                mii.fType      = oldType | 0x00000100
+                mii.dwItemData = slot
+                ok = SetMenuItemInfoA(menu, a, TRUE, &mii)
+            ENDIF
+
+            IF hSub <> 0 THEN EnableOwnerDraw(hSub)
+        ENDIF
+    NEXT a
     RETURN
 ENDSUB
 
 SUB CBrushedMenuBase::AttachMenu(HWND hwnd, HMENU menu)
-    IF menu = 0 THEN RETURN
+    IF menu = 0 OR hwnd = 0 THEN RETURN
 
     m_hwnd = hwnd
     m_menu = menu
+    g_pBrushedMenuInstance = THIS
 
-    ' 1. Apply brushed background pattern to top menu bar
     MENUINFO mi
     RtlZeroMemory(&mi, LEN(mi))
     mi.cbSize  = LEN(mi)
@@ -50,80 +625,112 @@ SUB CBrushedMenuBase::AttachMenu(HWND hwnd, HMENU menu)
     mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
     SetMenuInfo(menu, &mi)
 
-    ' 2. Recursively apply brushed background pattern to all child popups
     SkinSubmenus(menu)
+    EnableOwnerDraw(menu)
+    m_baseSlot = m_nextSlot
+
+    INT pOldProc = GetWindowLongA(hwnd, -4) ' GWL_WNDPROC = -4
+    IF pOldProc <> &CBrushedMenu_SubclassProc THEN
+        SetPropA(hwnd, "BRUSHED_OLDWNDPROC", pOldProc)
+        SetWindowLongA(hwnd, -4, &CBrushedMenu_SubclassProc)
+    ENDIF
 
     DrawMenuBar(hwnd)
     RETURN
 ENDSUB
 
-SUB CBrushedMenuBase::SkinSubmenus(HMENU menu)
-    IF menu = 0 THEN RETURN
+SUB CBrushedMenuBase::HandleMessages(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam), INT
+    RETURN FALSE
+ENDSUB
 
-    ' 1. Apply pattern brush directly to the root menu handle passed in
-    MENUINFO mi
-    RtlZeroMemory(&mi, LEN(mi))
-    mi.cbSize  = LEN(mi)
-    mi.fMask   = 0x80000002 ' MIM_BACKGROUND | MIM_APPLYTOSUBMENUS
-    mi.hbrBack = IIF(m_hbrBrushed <> NULL, m_hbrBrushed, GetSysColorBrush(COLOR_MENU))
-    SetMenuInfo(menu, &mi)
-
-    ' 2. Recurse into child submenus if any exist
-    MENUITEMINFO mii
-    INT a = 0
-    INT count = GetMenuItemCount(menu)
-    If count <= 0 THEN RETURN
-
-    For a = 0 TO count - 1
-        RtlZeroMemory(&mii, LEN(mii))
-        mii.cbSize = LEN(mii)
-        mii.fMask  = 0x00000004 ' MIIM_SUBMENU
-
-        If GetMenuItemInfoA(menu, a, TRUE, &mii) <> 0 Then
-            If mii.hSubMenu <> 0 AND mii.hSubMenu <> menu Then
-                SkinSubmenus(mii.hSubMenu)
-            EndIf
-        EndIf
-    Next a
+SUB CBrushedMenuBase::OnMeasureItem(HWND hwnd, POINTER pLparam)
     RETURN
 ENDSUB
 
-SUB CBrushedMenuBase::AssignBitmapIndex(WORD wID, INT index)
-    MENUITEMINFO mii
-    BITMAP bm
-    RtlZeroMemory(&mii, LEN(mii))
+SUB CBrushedMenuBase::OnDrawItem(HWND hwnd, POINTER pLparam)
+    RETURN
+ENDSUB
 
-    IF m_bmp <> NULL AND GetObjectA(m_bmp, LEN(bm), &bm) <> 0 THEN
-        mii.cbSize = LEN(mii)
-        mii.fMask  = 0x00000020 ' MIIM_CHECKMARKS
+$option "/p 1"
 
-        HDC hdc      = GetDCA(m_hwnd)
-        HDC hdc_from = CreateCompatibleDC(hdc)
-        HDC hdc_to   = CreateCompatibleDC(hdc)
+SUB BlendHighlightRect(HDC hdc, POINTER pRc, DWORD highlightColor)
+    IF pRc = NULL THEN RETURN
 
-        INT x = index * bm.bmHeight
+    INT rcLeft   = #<INT>(pRc + 0)
+    INT rcTop    = #<INT>(pRc + 4)
+    INT rcRight  = #<INT>(pRc + 8)
+    INT rcBottom = #<INT>(pRc + 12)
 
-        mii.hbmpChecked   = CreateCompatibleBitmap(hdc, bm.bmHeight, bm.bmHeight)
-        mii.hbmpUnchecked = CreateCompatibleBitmap(hdc, bm.bmHeight, bm.bmHeight)
+    INT w = rcRight - rcLeft
+    INT h = rcBottom - rcTop
+    IF w <= 0 OR h <= 0 THEN RETURN
 
-        INT bmp_from = SelectObject(hdc_from, m_bmp)
-        INT bmp_to
+    HDC hdcMem = CreateCompatibleDC(hdc)
+    BITMAPINFO bmi
+    RtlZeroMemory(&bmi, LEN(bmi))
+    bmi.bmiHeader.biSize        = LEN(bmi.bmiHeader)
+    bmi.bmiHeader.biWidth       = w
+    bmi.bmiHeader.biHeight      = -h
+    bmi.bmiHeader.biPlanes     = 1
+    bmi.bmiHeader.biBitCount   = 32
+    bmi.bmiHeader.biCompression = 0
 
-        bmp_to = SelectObject(hdc_to, mii.hbmpChecked)
-        BitBlt(hdc_to, 0, 0, bm.bmHeight, bm.bmHeight, hdc_from, x, 0, SRCCOPY)
-        SelectObject(hdc_to, bmp_to)
-
-        bmp_to = SelectObject(hdc_to, mii.hbmpUnchecked)
-        BitBlt(hdc_to, 0, 0, bm.bmHeight, bm.bmHeight, hdc_from, x, 0, SRCCOPY)
-        SelectObject(hdc_to, bmp_to)
-
-        SelectObject(hdc_from, bmp_from)
-
-        ReleaseDC(m_hwnd, hdc)
-        DeleteDC(hdc_from)
-        DeleteDC(hdc_to)
-
-        SetMenuItemInfoA(m_menu, wID, FALSE, &mii)
+    POINTER pBits = NULL
+    HBITMAP hBmp = CreateDIBSection(hdcMem, &bmi, 0, &pBits, NULL, 0)
+    IF hBmp = NULL THEN
+        DeleteDC(hdcMem)
+        RETURN
     ENDIF
+
+    HBITMAP hOldBmp = SelectObject(hdcMem, hBmp)
+    BitBlt(hdcMem, 0, 0, w, h, hdc, rcLeft, rcTop, 0x00CC0020)
+
+    INT totalPixels = w * h
+
+    _asm
+        push edi
+        push ebx
+
+        mov edi, [pBits]
+        mov ebx, [totalPixels]
+        mov eax, [highlightColor]
+
+        movd xmm0, eax
+        pshufd xmm0, xmm0, 0x00
+
+        mov ecx, ebx
+        shr ecx, 2
+
+    .blend_sse2_rect:
+        test ecx, ecx
+        jz .blend_tail_rect
+        movdqu xmm1, [edi]
+        pavgb xmm1, xmm0
+        movdqu [edi], xmm1
+        add edi, 16
+        dec ecx
+        jnz .blend_sse2_rect
+
+    .blend_tail_rect:
+        mov ecx, ebx
+        and ecx, 3
+        jz .blend_done_rect
+
+    .blend_tail_loop_rect:
+        mov [edi], eax
+        add edi, 4
+        dec ecx
+        jnz .blend_tail_loop_rect
+
+    .blend_done_rect:
+        pop ebx
+        pop edi
+    _endasm
+
+    BitBlt(hdc, rcLeft, rcTop, w, h, hdcMem, 0, 0, 0x00CC0020)
+
+    SelectObject(hdcMem, hOldBmp)
+    DeleteObject(hBmp)
+    DeleteDC(hdcMem)
     RETURN
 ENDSUB
