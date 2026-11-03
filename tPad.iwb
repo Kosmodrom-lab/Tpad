@@ -148,6 +148,10 @@ GLOBAL INT g_ForceEnc = -1  ' >= 0: loader must use this encoding instead of det
 GLOBAL INT g_LoadError = 0
 GLOBAL INT g_SaveError = 0   ' 0 = ok or user cancelled, otherwise a Win32 error code
 GLOBAL INT g_HexTrace = 0
+CONST CAP_H = 22                        ' caption bar height at 96 DPI
+GLOBAL WINRECT g_capCloseRc             ' close button rectangle (client coordinates)
+GLOBAL INT g_capDown = 0                ' 1 = left button pressed on the close button (mouse captured)
+GLOBAL INT g_capPush = 0                ' 1 = ... and the pointer is still over it (drawn pushed)
 GLOBAL ISTRING g_tipTxt[300]
 
 
@@ -325,7 +329,7 @@ ENUM tool_controls
     ctlToolDel
     ctlToolUp
     ctlToolDown
-    lblToolTitle
+    lblToolNote
     lblToolName
     lblToolPath
     lblToolArgs
@@ -485,6 +489,10 @@ DECLARE ToolsLoadFields()
 DECLARE ToolsSwap(INT a, INT b)
 DECLARE ToolsClose(INT result)
 DECLARE ToolIconIndex(STRING p$), INT
+DECLARE CapCalcCloseRect(UINT hwnd)
+DECLARE CapInClose(UINT hwnd, POINTER lpP), INT
+DECLARE CapPaint(UINT hwnd)
+DECLARE CapHandle(UINT hwnd, INT uMsg, POINTER lParam), INT
 
 ': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 ': API Imports & Constants
@@ -3337,25 +3345,27 @@ SUB FindEditProc(INT hwnd, INT uMsg, INT wParam, POINTER lParam), INT
 ENDSUB
 
 SUB Load_FindReplace()
-    CREATEDIALOG dlg_find, 100, 100, DpiPx(350), DpiPx(90), @NOCAPTION, WIN, "Find", &routineFindReplace
-    CONTROL dlg_find, @STATIC, "Search for", DpiPx(10), DpiPx(18), DpiPx(80), DpiPx(20), 0, lblSearch
-    CONTROL dlg_find, @COMBOBOX, "", DpiPx(90), DpiPx(15), DpiPx(150), DpiPx(110), 0x50210042, ctlSearchtext
-    CONTROL dlg_find, @CHECKBOX, "&Match Case", DpiPx(90), DpiPx(40), DpiPx(100), DpiPx(20), 0x5001000B, ctlMatchCase
-    CONTROL dlg_find, @CHECKBOX, "&Match Whole Word", DpiPx(90), DpiPx(62), DpiPx(150), DpiPx(20), 0x5001000B, ctlMatchWholeWord
-    CONTROL dlg_find, @BUTTON, "&Find", DpiPx(250), DpiPx(15), DpiPx(90), DpiPx(24), 0x5001000B, ctlFind
-    CONTROL dlg_find, @BUTTON, "&Close", DpiPx(250), DpiPx(48), DpiPx(90), DpiPx(24), 0x5001000B, ctlClose
+    INT o = DpiPx(CAP_H) - DpiPx(4)                          ' 18 px at 96 DPI: room for the caption bar
 
-    CREATEDIALOG dlg_findreplace, 100, 100, DpiPx(350), DpiPx(130), @NOCAPTION, WIN, "Find/Replace", &routineFindReplace
-    CONTROL dlg_findreplace, @STATIC, "Search for", DpiPx(10), DpiPx(18), DpiPx(80), DpiPx(20), 0, lblSearch
-    CONTROL dlg_findreplace, @COMBOBOX, "", DpiPx(100), DpiPx(15), DpiPx(150), DpiPx(110), 0x50210042, ctlSearchtext
-    CONTROL dlg_findreplace, @STATIC, "Replace with", DpiPx(10), DpiPx(43), DpiPx(85), DpiPx(20), 0, lblReplace
-    CONTROL dlg_findreplace, @COMBOBOX, "", DpiPx(100), DpiPx(40), DpiPx(150), DpiPx(110), 0x50210042, ctlReplacetext
-    CONTROL dlg_findreplace, @CHECKBOX, "&Match Case", DpiPx(100), DpiPx(65), DpiPx(100), DpiPx(20), 0x5001000B, ctlMatchCase
-    CONTROL dlg_findreplace, @CHECKBOX, "&Match Whole Word", DpiPx(100), DpiPx(87), DpiPx(150), DpiPx(20), 0x5001000B, ctlMatchWholeWord
-    CONTROL dlg_findreplace, @BUTTON, "&Find Next", DpiPx(255), DpiPx(10), DpiPx(90), DpiPx(24), 0x5001000B, ctlFind
-    CONTROL dlg_findreplace, @BUTTON, "&Replace", DpiPx(255), DpiPx(40), DpiPx(90), DpiPx(24), 0x5001000B, ctlReplaceBtn
-    CONTROL dlg_findreplace, @BUTTON, "Repl. &All", DpiPx(255), DpiPx(70), DpiPx(90), DpiPx(24), 0x5001000B, ctlReplaceAll
-    CONTROL dlg_findreplace, @BUTTON, "&Close", DpiPx(255), DpiPx(100), DpiPx(90), DpiPx(24), 0x5001000B, ctlClose
+    CREATEDIALOG dlg_find, 100, 100, DpiPx(350), DpiPx(90) + o, @NOCAPTION, WIN, "Find", &routineFindReplace
+    CONTROL dlg_find, @STATIC, "Search for", DpiPx(10), DpiPx(18) + o, DpiPx(80), DpiPx(20), 0, lblSearch
+    CONTROL dlg_find, @COMBOBOX, "", DpiPx(90), DpiPx(15) + o, DpiPx(150), DpiPx(110), 0x50210042, ctlSearchtext
+    CONTROL dlg_find, @CHECKBOX, "&Match Case", DpiPx(90), DpiPx(40) + o, DpiPx(100), DpiPx(20), 0x5001000B, ctlMatchCase
+    CONTROL dlg_find, @CHECKBOX, "&Match Whole Word", DpiPx(90), DpiPx(62) + o, DpiPx(150), DpiPx(20), 0x5001000B, ctlMatchWholeWord
+    CONTROL dlg_find, @BUTTON, "&Find", DpiPx(250), DpiPx(15) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlFind
+    CONTROL dlg_find, @BUTTON, "&Close", DpiPx(250), DpiPx(48) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlClose
+
+    CREATEDIALOG dlg_findreplace, 100, 100, DpiPx(350), DpiPx(130) + o, @NOCAPTION, WIN, "Find/Replace", &routineFindReplace
+    CONTROL dlg_findreplace, @STATIC, "Search for", DpiPx(10), DpiPx(18) + o, DpiPx(80), DpiPx(20), 0, lblSearch
+    CONTROL dlg_findreplace, @COMBOBOX, "", DpiPx(100), DpiPx(15) + o, DpiPx(150), DpiPx(110), 0x50210042, ctlSearchtext
+    CONTROL dlg_findreplace, @STATIC, "Replace with", DpiPx(10), DpiPx(43) + o, DpiPx(85), DpiPx(20), 0, lblReplace
+    CONTROL dlg_findreplace, @COMBOBOX, "", DpiPx(100), DpiPx(40) + o, DpiPx(150), DpiPx(110), 0x50210042, ctlReplacetext
+    CONTROL dlg_findreplace, @CHECKBOX, "&Match Case", DpiPx(100), DpiPx(65) + o, DpiPx(100), DpiPx(20), 0x5001000B, ctlMatchCase
+    CONTROL dlg_findreplace, @CHECKBOX, "&Match Whole Word", DpiPx(100), DpiPx(87) + o, DpiPx(150), DpiPx(20), 0x5001000B, ctlMatchWholeWord
+    CONTROL dlg_findreplace, @BUTTON, "&Find Next", DpiPx(255), DpiPx(10) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlFind
+    CONTROL dlg_findreplace, @BUTTON, "&Replace", DpiPx(255), DpiPx(40) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlReplaceBtn
+    CONTROL dlg_findreplace, @BUTTON, "Repl. &All", DpiPx(255), DpiPx(70) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlReplaceAll
+    CONTROL dlg_findreplace, @BUTTON, "&Close", DpiPx(255), DpiPx(100) + o, DpiPx(90), DpiPx(24), 0x5001000B, ctlClose
     RETURN
 EndSub
 
@@ -7505,6 +7515,16 @@ ENDSUB
 ': Brushed Find/Replace dialog
 ': ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 SUB ColorFindSubClass(hwnd : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+    IF uMsg = 0x000F OR uMsg = 0x0006 THEN              ' WM_PAINT / WM_ACTIVATE: default first, then the caption on top
+        IF g_FindOrig <> 0 THEN CallWindowProcA(g_FindOrig, hwnd, uMsg, wParam, lParam)
+        CapPaint(hwnd)
+        RETURN 0
+    ENDIF
+    IF uMsg >= 0x0200 AND uMsg <= 0x0202 THEN           ' mouse move / left down / left up
+        IF CapHandle(hwnd, uMsg, lParam) = 1 THEN RETURN 0
+    ENDIF
+    IF uMsg = 0x0215 THEN CapHandle(hwnd, uMsg, lParam)
+
     Select uMsg
         Case WM_CTLCOLOREDIT
             If g_hFindEditBgBrush = 0 THEN g_hFindEditBgBrush = CreateSolidBrush(RGB(253, 246, 227))
@@ -8583,17 +8603,18 @@ ENDSUB
 SUB Load_ToolsDlg()
     CREATEDIALOG dlg_tools, 100, 100, DpiPx(430), DpiPx(250), @NOCAPTION, WIN, "Configure Tools", &routineTools
 
-    CONTROL dlg_tools, @STATIC, "Configure Tools", DpiPx(10), DpiPx(8), DpiPx(300), DpiPx(18), @SFSTRIKEOUT, lblToolTitle
-    CONTROL dlg_tools, @LISTBOX, "", DpiPx(10), DpiPx(30), DpiPx(180), DpiPx(150), 0x50A10101, ctlToolList   ' visible|child|tabstop|vscroll|border|notify|nointegralheight
+    CONTROL dlg_tools, @LISTBOX, "", DpiPx(10), DpiPx(30), DpiPx(180), DpiPx(130), 0x50A10101, ctlToolList   ' visible|child|tabstop|vscroll|border|notify|nointegralheight
 
-    CONTROL dlg_tools, @BUTTON, "&Add",    DpiPx(10),  DpiPx(186), DpiPx(42), DpiPx(24), 0x5001000B, ctlToolAdd
-    CONTROL dlg_tools, @BUTTON, "&Remove", DpiPx(54),  DpiPx(186), DpiPx(56), DpiPx(24), 0x5001000B, ctlToolDel
-    CONTROL dlg_tools, @BUTTON, "Up",      DpiPx(112), DpiPx(186), DpiPx(36), DpiPx(24), 0x5001000B, ctlToolUp
-    CONTROL dlg_tools, @BUTTON, "Down",    DpiPx(150), DpiPx(186), DpiPx(40), DpiPx(24), 0x5001000B, ctlToolDown
+    CONTROL dlg_tools, @BUTTON, "&Add",    DpiPx(10),  DpiPx(166), DpiPx(42), DpiPx(24), 0x5001000B, ctlToolAdd
+    CONTROL dlg_tools, @BUTTON, "&Remove", DpiPx(54),  DpiPx(166), DpiPx(56), DpiPx(24), 0x5001000B, ctlToolDel
+    CONTROL dlg_tools, @BUTTON, "Up",      DpiPx(112), DpiPx(166), DpiPx(36), DpiPx(24), 0x5001000B, ctlToolUp
+    CONTROL dlg_tools, @BUTTON, "Down",    DpiPx(150), DpiPx(166), DpiPx(40), DpiPx(24), 0x5001000B, ctlToolDown
+
+    CONTROL dlg_tools, @STATIC, "Add a program (.exe, .bat, .cmd)" + CHR$(13) + CHR$(10) + "or a document (.pdf, .chm, .hlp)" + CHR$(13) + CHR$(10) + "- it opens in its default app.", DpiPx(10), DpiPx(196), DpiPx(255), DpiPx(48), 0, lblToolNote
 
     CONTROL dlg_tools, @STATIC, "Name",      DpiPx(200), DpiPx(34),  DpiPx(66), DpiPx(18), 0, lblToolName
     CONTROL dlg_tools, @EDIT,   "",          DpiPx(270), DpiPx(31),  DpiPx(150), DpiPx(20), @TABSTOP|@CTEDITAUTOH, ctlToolName
-    CONTROL dlg_tools, @STATIC, "File",   DpiPx(200), DpiPx(62),  DpiPx(66), DpiPx(18), 0, lblToolPath
+    CONTROL dlg_tools, @STATIC, "File",      DpiPx(200), DpiPx(62),  DpiPx(66), DpiPx(18), 0, lblToolPath
     CONTROL dlg_tools, @EDIT,   "",          DpiPx(270), DpiPx(59),  DpiPx(120), DpiPx(20), @TABSTOP|@CTEDITAUTOH, ctlToolPath
     CONTROL dlg_tools, @BUTTON, "...",       DpiPx(394), DpiPx(58),  DpiPx(26), DpiPx(22), 0x5001000B, ctlToolBrowse
     CONTROL dlg_tools, @STATIC, "Arguments", DpiPx(200), DpiPx(90),  DpiPx(66), DpiPx(18), 0, lblToolArgs
@@ -8803,9 +8824,137 @@ SUB routineTools(), INT
     RETURN 0
 ENDSUB
 
+SUB CapCalcCloseRect(UINT hwnd)
+    WINRECT rcC
+    INT capH = DpiPx(CAP_H)
+    INT bs   = capH - DpiPx(6)                        ' square button, 16 px at 96 DPI
+    GetClientRect(hwnd, &rcC)
+    g_capCloseRc.right  = rcC.right - DpiPx(3)
+    g_capCloseRc.left   = g_capCloseRc.right - bs
+    g_capCloseRc.top    = (capH - bs) / 2
+    g_capCloseRc.bottom = g_capCloseRc.top + bs
+ENDSUB
+
+' lpP = mouse message lParam (client coordinates). 1 when the point is inside the close button.
+SUB CapInClose(UINT hwnd, POINTER lpP), INT
+    INT lp  = lpP
+    INT cmx = lp & 0xFFFF
+    INT cmy = (lp >> 16) & 0xFFFF
+    CapCalcCloseRect(hwnd)
+    IF cmx >= g_capCloseRc.left AND cmx < g_capCloseRc.right THEN
+        IF cmy >= g_capCloseRc.top AND cmy < g_capCloseRc.bottom THEN RETURN 1
+    ENDIF
+    RETURN 0
+ENDSUB
+
+SUB CapPaint(UINT hwnd)
+    WINRECT rcC, rcBar, rcT, rcLine
+    ISTRING tb[80]
+    STRING t$
+    INT capH = DpiPx(CAP_H)
+    INT st, act
+    UINT hbr, hf, hOld
+
+    UINT hdc = GetDC(hwnd)
+    IF hdc = 0 THEN RETURN
+    GetClientRect(hwnd, &rcC)
+    CapCalcCloseRect(hwnd)
+
+    act = 0
+    IF GetActiveWindow() = hwnd THEN act = 1
+
+    ' bar (dark slate when the dialog is active, lighter grey-blue when it is not)
+    rcBar.left = 0 : rcBar.top = 0 : rcBar.right = rcC.right : rcBar.bottom = capH
+    IF act = 1 THEN hbr = CreateSolidBrush(RGB(46, 56, 76)) ELSE hbr = CreateSolidBrush(RGB(104, 112, 128))
+    FillRect(hdc, &rcBar, hbr)
+    DeleteObject(hbr)
+
+    ' 1 px dark line under the bar
+    rcLine.left = 0 : rcLine.top = capH - 1 : rcLine.right = rcC.right : rcLine.bottom = capH
+    hbr = CreateSolidBrush(RGB(24, 30, 42))
+    FillRect(hdc, &rcLine, hbr)
+    DeleteObject(hbr)
+
+    ' title = the dialog's own caption string
+    tb = ""
+    GetWindowTextA(hwnd, &tb, 80)
+    t$ = tb
+    hf = CreateUIFont(9, 700)
+    hOld = SelectObject(hdc, hf)
+    SetBkMode(hdc, 1)                                         ' TRANSPARENT
+    IF act = 1 THEN SetTextColor(hdc, RGB(255, 255, 255)) ELSE SetTextColor(hdc, RGB(225, 228, 235))
+    rcT.left = DpiPx(8) : rcT.top = 0 : rcT.right = g_capCloseRc.left - DpiPx(4) : rcT.bottom = capH - 1
+    DrawTextA(hdc, t$, -1, &rcT, 0x00008824)                  ' DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS
+    SelectObject(hdc, hOld)
+    DeleteObject(hf)
+
+    ' close button
+    st = 0                                                    ' DFCS_CAPTIONCLOSE
+    IF g_capPush = 1 THEN st = 0x0200                         ' | DFCS_PUSHED
+    DrawFrameControl(hdc, &g_capCloseRc, 1, st)               ' DFC_CAPTION
+
+    ReleaseDC(hwnd, hdc)
+ENDSUB
+
+' mouse handling of the close button; returns 1 when the message was consumed (do not pass it on)
+SUB CapHandle(UINT hwnd, INT uMsg, POINTER lParam), INT
+    SELECT uMsg
+        CASE 0x0201                                   ' WM_LBUTTONDOWN
+            IF CapInClose(hwnd, lParam) = 1 THEN
+                g_capDown = 1
+                g_capPush = 1
+                SetCapture(hwnd)
+                CapPaint(hwnd)
+                RETURN 1                              ' not passed on, so DragWindow does not start
+            ENDIF
+
+        CASE 0x0200                                   ' WM_MOUSEMOVE
+            IF g_capDown = 1 THEN
+                IF CapInClose(hwnd, lParam) <> g_capPush THEN
+                    g_capPush = 1 - g_capPush
+                    CapPaint(hwnd)
+                ENDIF
+                RETURN 1
+            ENDIF
+
+        CASE 0x0202                                   ' WM_LBUTTONUP
+            IF g_capDown = 1 THEN
+                g_capDown = 0
+                ReleaseCapture()
+                IF g_capPush = 1 THEN
+                    g_capPush = 0
+                    CapPaint(hwnd)
+                    PostMessageA(hwnd, 0x0010, 0, 0)  ' WM_CLOSE -> @IDCLOSEWINDOW of that dialog
+                ELSE
+                    CapPaint(hwnd)
+                ENDIF
+                RETURN 1
+            ENDIF
+
+        CASE 0x0215                                   ' WM_CAPTURECHANGED (capture lost some other way)
+            IF g_capDown = 1 THEN
+                g_capDown = 0
+                g_capPush = 0
+                CapPaint(hwnd)
+            ENDIF
+    ENDSELECT
+    RETURN 0
+ENDSUB
+
 ' Same cream look as the Find dialog.
 SUB ToolsColorSubClass(hwnd : INT, uMsg : INT, wParam : INT, lParam : POINTER), INT
+    IF uMsg = 0x000F OR uMsg = 0x0006 THEN              ' WM_PAINT / WM_ACTIVATE: default first, then the caption on top
+        IF g_ToolsOrig <> 0 THEN CallWindowProcA(g_ToolsOrig, hwnd, uMsg, wParam, lParam)
+        CapPaint(hwnd)
+        RETURN 0
+    ENDIF
+    IF uMsg >= 0x0200 AND uMsg <= 0x0202 THEN           ' mouse move / left down / left up
+        IF CapHandle(hwnd, uMsg, lParam) = 1 THEN RETURN 0
+    ENDIF
+    IF uMsg = 0x0215 THEN CapHandle(hwnd, uMsg, lParam)
+
     Select uMsg
+
         Case WM_CTLCOLOREDIT
             If g_hFindEditBgBrush = 0 THEN g_hFindEditBgBrush = CreateSolidBrush(RGB(253, 246, 227))
             SetTextColor(wParam, RGB(0, 0, 0))
